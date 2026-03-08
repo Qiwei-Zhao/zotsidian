@@ -203,6 +203,7 @@ Zotsidian is designed around live local resolution against Zotero Desktop. For c
 - Zotero Desktop should be running while you use Obsidian
 - your cited items should exist in the local Zotero library you want to query
 - Zotero local API access should be available on the local machine
+- in Zotero, open `Settings / Preferences -> Advanced` and enable `Allow other applications on this computer to communicate with Zotero`
 
 For most users, this also means:
 
@@ -248,6 +249,11 @@ This is the recommended installation method before Zotsidian is available in the
 4. Copy the three files into that folder
 5. Enable **Zotsidian** in Obsidian community plugins
 
+Important:
+
+- In Zotero, go to `Settings / Preferences -> Advanced` and make sure `Allow other applications on this computer to communicate with Zotero` is enabled.
+- If this option is off, Zotsidian may fail to load citation indexes, attachments, and hover data.
+
 ### Manual installation from source
 
 Use this if you want to modify the plugin or test the source code directly.
@@ -289,18 +295,19 @@ You still need to copy the built files into your vault plugin folder, or symlink
 ## Quick start
 
 1. Start Zotero Desktop
-2. Enable Zotsidian in Obsidian
-3. Make sure the Zotero items you want to cite already have usable citation keys
+2. In Zotero, go to `Settings / Preferences -> Advanced` and enable `Allow other applications on this computer to communicate with Zotero`
+3. Enable Zotsidian in Obsidian
+4. Make sure the Zotero items you want to cite already have usable citation keys
    - for most users, this means Better BibTeX is installed and generating citation keys
-4. Check these settings:
+5. Check these settings:
    - `Default Zotero scope`
    - `Citation insert format`
    - `Create source page on citation select`
    - `Source pages folder`
-5. Type `@` in a note and insert a citation
-6. Hover the citation to open the PDF or Zotero item
-7. Use the References sidebar to inspect cited papers
-8. If needed, open or create an `@citekey` source page for deeper inspection
+6. Type `@` in a note and insert a citation
+7. Hover the citation to open the PDF or Zotero item
+8. Use the References sidebar to inspect cited papers
+9. If needed, open or create an `@citekey` source page for deeper inspection
 
 ## License
 
