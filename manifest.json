@@ -1,0 +1,9 @@
+{
+	"id": "zotsidian",
+	"name": "Zotsidian",
+	"version": "0.0.1",
+	"minAppVersion": "1.10.6",
+	"description": "Zotero-native citations, source pages, hover cards, and related literature workflows for Obsidian.",
+	"author": "Qiwei Zhao",
+	"isDesktopOnly": true
+}
