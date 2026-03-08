@@ -1,6 +1,8 @@
 # Zotsidian
 
-Zotsidian is an Obsidian desktop plugin for Zotero(Zotero 8)-first writing and literature management. Zotsidian is primarily inspired by [zotero-roam](https://github.com/alixlahuec/zotero-roam) by Alix Lahuec, which is most amazing zotero extension I have ever used. Unfortunately, it seems no longer maintained and not compatible with the Obsidian and the latest Zotero versions. So I (let AI, i.e., Codex with GPT-5.4) made this extension.
+Zotsidian is an Obsidian desktop plugin for Zotero(Zotero 8)-first writing and literature management. It is primarily inspired by [zotero-roam](https://github.com/alixlahuec/zotero-roam) by Alix Lahuec which is most amazing extension I have ever used for zotero. Unfortunately, it seems no longer oftern maintained and does not work with the latest versions of Zotero and not compatible with Obsidian. Also inspired by [obsidian-deepsit](https://github.com/bassio/obsidian-deepsit), I (let AI, i.e., Codex GPT-5.4) made Zotsidian to be a more integrated and seamless experience for Obsidian users, with features like inline citation autocomplete, a dedicated references sidebar, source page enrichment, and citation hover cards.
+
+![Zotsidian overview](./gifs/image.png)
 
 It is built around four core capabilities:
 
