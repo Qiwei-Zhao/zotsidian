@@ -18,6 +18,8 @@ export interface CitationIndexEntry {
 
 export type CitationInsertFormat = 'pandoc' | 'plain' | 'wikilink';
 export type CitationHoverOpenAction = 'pdf-first' | 'zotero-first';
+export type CitationConnectionState = 'unknown' | 'connecting' | 'connected' | 'degraded' | 'disconnected';
+export type CitationIndexSource = 'memory' | 'disk' | 'live-export' | 'local-api' | 'json-fallback' | 'none';
 
 interface ZotsidianSettings {
 	defaultZoteroScope: string;
@@ -39,6 +41,20 @@ interface ZotsidianSettings {
 	citationHoverOpenAction: CitationHoverOpenAction;
 	showJsonFallbackSettingInAdvanced: boolean;
 }
+
+type PersistedCitationIndexCache = {
+	rows: CitationIndexEntry[];
+	cachedAt: number;
+	source: Exclude<CitationIndexSource, 'memory' | 'disk' | 'none'>;
+};
+
+type InternalPluginState = {
+	citationIndexCacheByScope: Record<string, PersistedCitationIndexCache>;
+};
+
+type ZotsidianStoredData = Partial<ZotsidianSettings> & {
+	_internal?: Partial<InternalPluginState>;
+};
 
 const DEFAULT_SETTINGS: ZotsidianSettings = {
 	defaultZoteroScope: 'My Library',
@@ -229,7 +245,7 @@ class ZotsidianSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Load attachment links in source panel')
-			.setDesc('Show PDF or attachment links in the source sidebar.')
+			.setDesc('Show PDF or attachment links and local Zotero annotations in the source sidebar.')
 			.addToggle((toggle) => {
 				toggle
 					.setValue(this.plugin.settings.enableSidebarAttachments)
@@ -369,12 +385,25 @@ export type CitationHoverData = {
 	inLibrary: boolean;
 };
 
+export type CitationIndexStatus = {
+	scope: string;
+	connection: CitationConnectionState;
+	rows: number;
+	source: CitationIndexSource;
+	loading: boolean;
+	stale: boolean;
+	lastRefreshedAt: number | null;
+	cachedAt: number | null;
+	errorText: string;
+};
+
 export default class ZotsidianPlugin extends Plugin {
 	settings: ZotsidianSettings;
 	_activeFilePath: string = '';
 
 	private _indexByScope: Map<string, CitationIndexEntry[]> = new Map();
 	private _indexPromiseByScope: Map<string, Promise<CitationIndexEntry[]>> = new Map();
+	private _indexStatusByScope: Map<string, CitationIndexStatus> = new Map();
 	private _discourseConfigLoaded: boolean = false;
 	private _discourseSourceNodeTypeId: string | null = null;
 	private _discourseNodesFolderPath: string = 'discourse_graph_nodes';
@@ -386,6 +415,8 @@ export default class ZotsidianPlugin extends Plugin {
 	private _baseHoverTargetEl: HTMLElement | null = null;
 	private _baseHoverHideTimer: number | null = null;
 	private _baseHoverSwitchTimer: number | null = null;
+	private _persistDataTimer: number | null = null;
+	private _internalState: InternalPluginState = { citationIndexCacheByScope: {} };
 
 	get activeFilePath() {
 		return this._activeFilePath;
@@ -425,6 +456,221 @@ export default class ZotsidianPlugin extends Plugin {
 		return (this.settings.defaultZoteroScope || 'My Library').trim();
 	}
 
+	getActiveScope(): string {
+		const active = this.app.workspace.getActiveFile();
+		const cache = active ? this.app.metadataCache.getFileCache(active) : null;
+		return this.resolveScopeFromFrontmatter(cache?.frontmatter as Record<string, unknown> | undefined);
+	}
+
+	private defaultCitationIndexStatus(scope: string): CitationIndexStatus {
+		return {
+			scope,
+			connection: 'unknown',
+			rows: 0,
+			source: 'none',
+			loading: false,
+			stale: false,
+			lastRefreshedAt: null,
+			cachedAt: null,
+			errorText: '',
+		};
+	}
+
+	private setCitationIndexStatus(scopePath: string, patch: Partial<CitationIndexStatus>) {
+		const scope = scopePath.trim();
+		if (!scope) return;
+		const current = this._indexStatusByScope.get(scope) || this.defaultCitationIndexStatus(scope);
+		const next: CitationIndexStatus = {
+			...current,
+			...patch,
+			scope,
+		};
+		this._indexStatusByScope.set(scope, next);
+		this.view?.refreshHeaderStatus();
+	}
+
+	getCitationIndexStatus(scopePath?: string): CitationIndexStatus {
+		const scope = (scopePath || this.getActiveScope() || this.settings.defaultZoteroScope || 'My Library').trim();
+		const current = this._indexStatusByScope.get(scope) || this.defaultCitationIndexStatus(scope);
+		return { ...current };
+	}
+
+	getCitationIndexStatusDisplay(scopePath?: string, detectedMentions: number = 0): { label: string; tone: 'connected' | 'loading' | 'degraded' | 'offline' | 'neutral'; title: string } {
+		const status = this.getCitationIndexStatus(scopePath);
+		let label = '';
+		let tone: 'connected' | 'loading' | 'degraded' | 'offline' | 'neutral' = 'neutral';
+
+		if (status.loading) {
+			label = 'Indexing…';
+			tone = 'loading';
+		} else if (status.connection === 'disconnected') {
+			label = 'Offline';
+			tone = 'offline';
+		} else if (status.connection === 'degraded') {
+			label = 'Degraded';
+			tone = 'degraded';
+		} else if (status.connection === 'connected') {
+			label = 'Connected';
+			tone = 'connected';
+		} else if (status.rows > 0) {
+			label = 'Connected';
+			tone = 'connected';
+		}
+
+		const sourceLabel = ({
+			'memory': 'memory cache',
+			'disk': 'disk cache',
+			'live-export': 'Zotero live export',
+			'local-api': 'Zotero local API',
+			'json-fallback': 'JSON fallback',
+			'none': 'no index',
+		} as Record<CitationIndexSource, string>)[status.source];
+		const lines = [
+			`Scope: ${status.scope}`,
+			`Rows: ${status.rows}`,
+			`Source: ${sourceLabel}`,
+		];
+		if (status.cachedAt) {
+			lines.push(`Cached: ${new Date(status.cachedAt).toLocaleString()}`);
+		}
+		if (status.lastRefreshedAt) {
+			lines.push(`Last refresh: ${new Date(status.lastRefreshedAt).toLocaleString()}`);
+		}
+		if (status.stale) {
+			lines.push('Status: using cached or fallback data');
+		}
+		if (detectedMentions > 0) {
+			lines.push(`Detected citekeys in view: ${detectedMentions}`);
+		}
+		if (status.errorText) {
+			lines.push(status.errorText);
+		}
+
+		return {
+			label,
+			tone,
+			title: lines.join('\n'),
+		};
+	}
+
+	private normalizeInternalState(rawInternal: unknown): InternalPluginState {
+		const state: InternalPluginState = { citationIndexCacheByScope: {} };
+		if (!rawInternal || typeof rawInternal !== 'object') return state;
+		const rawCache = (rawInternal as Record<string, unknown>).citationIndexCacheByScope;
+		if (!rawCache || typeof rawCache !== 'object') return state;
+		for (const [scope, value] of Object.entries(rawCache as Record<string, unknown>)) {
+			if (!value || typeof value !== 'object') continue;
+			const rowValue = (value as Record<string, unknown>).rows;
+			const cachedAt = (value as Record<string, unknown>).cachedAt;
+			const source = (value as Record<string, unknown>).source;
+			if (!Array.isArray(rowValue)) continue;
+			if (typeof cachedAt !== 'number' || !Number.isFinite(cachedAt)) continue;
+			if (source !== 'live-export' && source !== 'local-api' && source !== 'json-fallback') continue;
+			const rows = rowValue
+				.filter((entry): entry is CitationIndexEntry => {
+					if (!entry || typeof entry !== 'object') return false;
+					const item = entry as Record<string, unknown>;
+					return typeof item.id === 'string' && typeof item.title === 'string' && typeof item.meta === 'string' && typeof item.raw === 'object' && item.raw !== null;
+				})
+				.map((entry) => {
+					const item = entry as Record<string, unknown>;
+					return {
+						id: item.id as string,
+						title: item.title as string,
+						meta: item.meta as string,
+						raw: item.raw as Record<string, unknown>,
+					};
+				});
+			if (rows.length === 0) continue;
+			state.citationIndexCacheByScope[scope] = {
+				rows,
+				cachedAt,
+				source,
+			};
+		}
+		return state;
+	}
+
+	private buildStoredData(): ZotsidianStoredData {
+		return {
+			...this.settings,
+			_internal: this._internalState,
+		};
+	}
+
+	private schedulePersistPluginData() {
+		if (this._persistDataTimer != null) {
+			window.clearTimeout(this._persistDataTimer);
+		}
+		this._persistDataTimer = window.setTimeout(() => {
+			this._persistDataTimer = null;
+			void this.saveData(this.buildStoredData());
+		}, 250);
+	}
+
+	private classifyConnectionState(error: unknown): CitationConnectionState {
+		const message = error instanceof Error ? error.message : String(error || '');
+		const normalized = message.toLowerCase();
+		if (!normalized) return 'unknown';
+		if (
+			normalized.includes('econnrefused') ||
+			normalized.includes('err_connection_refused') ||
+			normalized.includes('unable to connect') ||
+			normalized.includes('socket hang up') ||
+			normalized.includes('local zotero api failed')
+		) {
+			return 'disconnected';
+		}
+		return 'degraded';
+	}
+
+	private describeIndexError(error: unknown): string {
+		if (!error) return '';
+		const message = error instanceof Error ? error.message : String(error);
+		const normalized = message.toLowerCase();
+		if (
+			normalized.includes('econnrefused') ||
+			normalized.includes('err_connection_refused') ||
+			normalized.includes('unable to connect') ||
+			normalized.includes('local zotero api failed')
+		) {
+			return 'Unable to reach Zotero. Check that Zotero is running and "Allow other applications on this computer to communicate with Zotero" is enabled.';
+		}
+		if (normalized.includes('unable to find zotero collection')) {
+			return message;
+		}
+		return message;
+	}
+
+	private loadCitationIndexFromDisk(scopePath: string): CitationIndexEntry[] {
+		const scope = scopePath.trim();
+		if (!scope) return [];
+		const cached = this._internalState.citationIndexCacheByScope[scope];
+		if (!cached || !Array.isArray(cached.rows) || cached.rows.length === 0) return [];
+		this._indexByScope.set(scope, cached.rows);
+		this.setCitationIndexStatus(scope, {
+			rows: cached.rows.length,
+			source: 'disk',
+			loading: false,
+			stale: true,
+			cachedAt: cached.cachedAt,
+			lastRefreshedAt: null,
+			errorText: '',
+		});
+		return cached.rows;
+	}
+
+	private persistCitationIndexCache(scopePath: string, entries: CitationIndexEntry[], source: Exclude<CitationIndexSource, 'memory' | 'disk' | 'none'>) {
+		const scope = scopePath.trim();
+		if (!scope) return;
+		this._internalState.citationIndexCacheByScope[scope] = {
+			rows: entries,
+			cachedAt: Date.now(),
+			source,
+		};
+		this.schedulePersistPluginData();
+	}
+
 	private getLeafFile(leaf: WorkspaceLeaf | null): TFile | null {
 		if (!leaf) return null;
 		const view = leaf.view as { file?: TFile | null };
@@ -434,14 +680,14 @@ export default class ZotsidianPlugin extends Plugin {
 	private isBaseLeaf(leaf: WorkspaceLeaf | null): boolean {
 		if (!leaf) return false;
 		const file = this.getLeafFile(leaf);
-		if (file?.extension === 'base') return true;
+		if (file?.extension === 'base' || file?.extension === 'canvas') return true;
 		const view = leaf.view as { getViewType?: () => string; type?: string; containerEl?: HTMLElement };
 		const type = typeof view?.getViewType === 'function' ? view.getViewType() : (typeof view?.type === 'string' ? view.type : '');
-		if (type.toLowerCase().includes('base')) return true;
+		if (type.toLowerCase().includes('base') || type.toLowerCase().includes('canvas')) return true;
 		const container = view?.containerEl;
 		return container instanceof HTMLElement && (
-			container.matches('[data-type*="base" i]') ||
-			!!container.querySelector('[class*="base" i], [data-type*="base" i]')
+			container.matches('[data-type*="base" i], [data-type*="canvas" i]') ||
+			!!container.querySelector('[class*="base" i], [data-type*="base" i], [class*="canvas" i], [data-type*="canvas" i]')
 		);
 	}
 
@@ -451,6 +697,7 @@ export default class ZotsidianPlugin extends Plugin {
 		const container = view?.containerEl;
 		if (!(container instanceof HTMLElement)) return null;
 		return (
+			container.querySelector<HTMLElement>('.canvas-wrapper') ||
 			container.querySelector<HTMLElement>('.view-content') ||
 			container.querySelector<HTMLElement>('.workspace-leaf-content') ||
 			container
@@ -465,7 +712,7 @@ export default class ZotsidianPlugin extends Plugin {
 	}
 
 	getVisibleCitationsFromActiveContext(activeFile: TFile | null): string[] | null {
-		if (!(activeFile instanceof TFile) || activeFile.extension !== 'base') return null;
+		if (!(activeFile instanceof TFile) || (activeFile.extension !== 'base' && activeFile.extension !== 'canvas')) return null;
 		const leaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
 		if (!this.isBaseLeaf(leaf)) return null;
 		return this.extractVisibleBaseCitationsFromLeaf(leaf);
@@ -497,7 +744,7 @@ export default class ZotsidianPlugin extends Plugin {
 			this._baseViewRefreshTimer = null;
 			const leaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
 			const file = this.getLeafFile(leaf) ?? this.app.workspace.getActiveFile();
-			if (!(file instanceof TFile) || file.extension !== 'base' || !this.isBaseLeaf(leaf)) return;
+			if (!(file instanceof TFile) || (file.extension !== 'base' && file.extension !== 'canvas') || !this.isBaseLeaf(leaf)) return;
 			await this.view?.refreshReferences();
 			await this.view?.renderReferences();
 		}, 140);
@@ -538,12 +785,13 @@ export default class ZotsidianPlugin extends Plugin {
 
 	private findBaseHoverTarget(start: HTMLElement, root: HTMLElement): { element: HTMLElement; citekey: string } | null {
 		let current: HTMLElement | null = start;
-		for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) {
+		while (current) {
 			if (current === root.parentElement) break;
 			if (current.classList.contains('zotsidian-base-hover-card')) return null;
 			const citekey = this.extractStandaloneCitationFromElement(current);
 			if (citekey) return { element: current, citekey };
 			if (current === root) break;
+			current = current.parentElement;
 		}
 		return null;
 	}
@@ -940,114 +1188,9 @@ export default class ZotsidianPlugin extends Plugin {
 		return [];
 	}
 
-	async ensureCitationIndex(scopePath: string, force: boolean = false): Promise<CitationIndexEntry[]> {
-		const scope = scopePath.trim();
-		if (!scope) return [];
-
-		if (!force && this._indexByScope.has(scope)) {
-			return this._indexByScope.get(scope) || [];
-		}
-		if (this._indexPromiseByScope.has(scope)) {
-			const pending = this._indexPromiseByScope.get(scope);
-			if (pending) return await pending;
-			return [];
-		}
-
-		const promise = (async () => {
-			let rawRows: unknown[] = [];
-			let apiError: unknown = null;
-			try {
-				const raw = await exportCollectionPath(scope, 'json') as unknown[];
-				rawRows = Array.isArray(raw) ? raw : [];
-			} catch (err) {
-				apiError = err;
-			}
-
-			if (rawRows.length === 0 && scope.includes('/')) {
-				const libraryOnlyScope = scope.split('/')[0]?.trim() || '';
-				if (libraryOnlyScope.length > 0 && libraryOnlyScope !== scope) {
-					try {
-						const fallbackRaw = await exportCollectionPath(libraryOnlyScope, 'json') as unknown[];
-						rawRows = Array.isArray(fallbackRaw) ? fallbackRaw : [];
-					} catch (_err) {
-						// Ignore; continue to local JSON fallback.
-					}
-				}
-			}
-
-			if (rawRows.length === 0) {
-				try {
-					rawRows = await localApiLibraryIndex(scope);
-				} catch (_err) {
-					// Ignore; continue to local JSON fallback.
-				}
-			}
-
-			if (rawRows.length === 0) {
-				rawRows = await this.loadLocalLibraryIndex(scope);
-			}
-
-			if (rawRows.length === 0 && apiError) {
-				console.warn(`Zotsidian: no index rows loaded for scope "${scope}".`, apiError);
-			}
-
-			const normalized = normalizeExportItems(rawRows);
-			const dedup = new Map<string, CitationIndexEntry>();
-			for (const row of normalized) {
-				const entry = this.toCitationEntry(row as Record<string, unknown>);
-				if (entry && !dedup.has(entry.id)) dedup.set(entry.id, entry);
-			}
-			const entries = Array.from(dedup.values());
-			this._indexByScope.set(scope, entries);
-			return entries;
-		})().finally(() => {
-			this._indexPromiseByScope.delete(scope);
-		});
-
-		this._indexPromiseByScope.set(scope, promise);
-		return await promise;
-	}
-
-	async searchCitationIndex(scopePath: string, query: string, limit: number = 40): Promise<CitationIndexEntry[]> {
-		const scope = scopePath.trim();
+	private searchEntries(entries: CitationIndexEntry[], query: string, limit: number): CitationIndexEntry[] {
 		const q = query.trim().toLowerCase();
-		if (!scope || !q) return [];
-
-		// Prefer live Zotero/BBT query so citekeys stay in sync with Zotero 8.
-		try {
-			const liveRows = await libraryCitekeysTitles(scope, query, Math.max(40, limit * 2)) as Array<{
-				id?: string;
-				title?: string;
-				meta?: string;
-				itemKey?: string;
-				zoteroItemID?: string;
-			}>;
-			if (Array.isArray(liveRows) && liveRows.length > 0) {
-				return liveRows
-					.filter((row): row is { id: string; title?: string; meta?: string; itemKey?: string; zoteroItemID?: string } => typeof row.id === 'string' && row.id.length > 0)
-					.slice(0, limit)
-					.map((row) => ({
-					id: row.id,
-					title: row.title || '',
-					meta: row.meta || '',
-					raw: {
-						id: row.id,
-						title: row.title || '',
-						itemKey: row.itemKey,
-						zoteroItemID: row.zoteroItemID,
-					},
-				}));
-			}
-		} catch (_err) {
-			// fall back to local in-memory index
-		}
-
-		let entries: CitationIndexEntry[] = [];
-		try {
-			entries = await this.ensureCitationIndex(scope, false);
-		} catch (_err) {
-			return [];
-		}
+		if (!q) return [];
 		const tokens = q.split(/\s+/).filter(Boolean);
 		const qCanonical = this.canonicalCitekey(q);
 		const scored: { entry: CitationIndexEntry; score: number }[] = [];
@@ -1075,21 +1218,271 @@ export default class ZotsidianPlugin extends Plugin {
 		return scored.slice(0, limit).map((x) => x.entry);
 	}
 
+	private async refreshCitationIndexFromSources(scopePath: string): Promise<CitationIndexEntry[]> {
+		const scope = scopePath.trim();
+		const existingRows = this._indexByScope.get(scope) || [];
+		const currentStatus = this._indexStatusByScope.get(scope) || this.defaultCitationIndexStatus(scope);
+		this.setCitationIndexStatus(scope, {
+			connection: existingRows.length > 0 ? currentStatus.connection : 'connecting',
+			rows: existingRows.length,
+			source: currentStatus.source,
+			loading: true,
+			stale: currentStatus.stale,
+			errorText: '',
+		});
+
+		let rawRows: unknown[] = [];
+		let apiError: unknown = null;
+		let source: Exclude<CitationIndexSource, 'memory' | 'disk' | 'none'> | 'none' = 'none';
+
+		try {
+			const raw = await exportCollectionPath(scope, 'json') as unknown[];
+			rawRows = Array.isArray(raw) ? raw : [];
+			if (rawRows.length > 0) {
+				source = 'live-export';
+			}
+		} catch (err) {
+			apiError = err;
+		}
+
+		if (rawRows.length === 0 && scope.includes('/')) {
+			const libraryOnlyScope = scope.split('/')[0]?.trim() || '';
+			if (libraryOnlyScope.length > 0 && libraryOnlyScope !== scope) {
+				try {
+					const fallbackRaw = await exportCollectionPath(libraryOnlyScope, 'json') as unknown[];
+					rawRows = Array.isArray(fallbackRaw) ? fallbackRaw : [];
+					if (rawRows.length > 0) {
+						source = 'live-export';
+					}
+				} catch (err) {
+					if (!apiError) apiError = err;
+				}
+			}
+		}
+
+		if (rawRows.length === 0) {
+			try {
+				rawRows = await localApiLibraryIndex(scope);
+				if (rawRows.length > 0) {
+					source = 'local-api';
+				}
+			} catch (err) {
+				if (!apiError) apiError = err;
+			}
+		}
+
+		if (rawRows.length === 0) {
+			rawRows = await this.loadLocalLibraryIndex(scope);
+			if (rawRows.length > 0) {
+				source = 'json-fallback';
+			}
+		}
+
+		if (rawRows.length === 0 && apiError) {
+			console.warn(`Zotsidian: no index rows loaded for scope "${scope}".`, apiError);
+		}
+
+		const normalized = normalizeExportItems(rawRows);
+		const dedup = new Map<string, CitationIndexEntry>();
+		for (const row of normalized) {
+			const entry = this.toCitationEntry(row as Record<string, unknown>);
+			if (entry && !dedup.has(entry.id)) dedup.set(entry.id, entry);
+		}
+		const entries = Array.from(dedup.values());
+		const now = Date.now();
+
+		if (entries.length > 0) {
+			this._indexByScope.set(scope, entries);
+			if (source !== 'none') {
+				this.persistCitationIndexCache(scope, entries, source);
+			}
+			this.setCitationIndexStatus(scope, {
+				connection: source === 'json-fallback'
+					? (apiError ? this.classifyConnectionState(apiError) : 'degraded')
+					: 'connected',
+				rows: entries.length,
+				source,
+				loading: false,
+				stale: source === 'json-fallback',
+				lastRefreshedAt: now,
+				cachedAt: now,
+				errorText: source === 'json-fallback' ? this.describeIndexError(apiError) : '',
+			});
+			return entries;
+		}
+
+		if (existingRows.length > 0) {
+			this.setCitationIndexStatus(scope, {
+				connection: apiError ? this.classifyConnectionState(apiError) : 'degraded',
+				rows: existingRows.length,
+				source: currentStatus.source,
+				loading: false,
+				stale: true,
+				errorText: this.describeIndexError(apiError),
+			});
+			return existingRows;
+		}
+
+		this.setCitationIndexStatus(scope, {
+			connection: apiError ? this.classifyConnectionState(apiError) : 'degraded',
+			rows: 0,
+			source: 'none',
+			loading: false,
+			stale: false,
+			lastRefreshedAt: null,
+			cachedAt: null,
+			errorText: apiError ? this.describeIndexError(apiError) : 'No index rows loaded for this scope.',
+		});
+		return [];
+	}
+
+	private async triggerCitationIndexRefresh(scopePath: string): Promise<CitationIndexEntry[]> {
+		const scope = scopePath.trim();
+		if (!scope) return [];
+		if (this._indexPromiseByScope.has(scope)) {
+			const pending = this._indexPromiseByScope.get(scope);
+			if (pending) return await pending;
+		}
+		const promise = this.refreshCitationIndexFromSources(scope).finally(() => {
+			this._indexPromiseByScope.delete(scope);
+			this.view?.refreshHeaderStatus();
+			if (this.getActiveScope() === scope) {
+				void this.view?.refreshReferences().then(async () => {
+					await this.view?.renderReferences();
+				});
+			}
+		});
+		this._indexPromiseByScope.set(scope, promise);
+		return await promise;
+	}
+
+	async ensureCitationIndex(scopePath: string, force: boolean = false): Promise<CitationIndexEntry[]> {
+		const scope = scopePath.trim();
+		if (!scope) return [];
+
+		if (!force && this._indexByScope.has(scope)) {
+			const entries = this._indexByScope.get(scope) || [];
+			const currentStatus = this._indexStatusByScope.get(scope) || this.defaultCitationIndexStatus(scope);
+			this.setCitationIndexStatus(scope, {
+				rows: entries.length,
+				source: currentStatus.source === 'none' ? 'memory' : currentStatus.source,
+			});
+			return entries;
+		}
+
+		if (!force) {
+			const diskRows = this.loadCitationIndexFromDisk(scope);
+			if (diskRows.length > 0) {
+				this.setCitationIndexStatus(scope, {
+					connection: 'connecting',
+					rows: diskRows.length,
+					source: 'disk',
+					loading: true,
+					stale: true,
+					errorText: '',
+				});
+				void this.triggerCitationIndexRefresh(scope);
+				return diskRows;
+			}
+		}
+
+		return await this.triggerCitationIndexRefresh(scope);
+	}
+
+	async searchCitationIndex(scopePath: string, query: string, limit: number = 40): Promise<CitationIndexEntry[]> {
+		const scope = scopePath.trim();
+		const q = query.trim().toLowerCase();
+		if (!scope || !q) return [];
+
+		let entries: CitationIndexEntry[] = [];
+		try {
+			entries = await this.ensureCitationIndex(scope, false);
+		} catch (_err) {
+			entries = [];
+		}
+		const cachedMatches = this.searchEntries(entries, q, limit);
+		if (cachedMatches.length > 0) {
+			return cachedMatches;
+		}
+
+		try {
+			const liveRows = await libraryCitekeysTitles(scope, query, Math.max(40, limit * 2)) as Array<{
+				id?: string;
+				title?: string;
+				meta?: string;
+				itemKey?: string;
+				zoteroItemID?: string;
+			}>;
+			if (Array.isArray(liveRows) && liveRows.length > 0) {
+				return liveRows
+					.filter((row): row is { id: string; title?: string; meta?: string; itemKey?: string; zoteroItemID?: string } => typeof row.id === 'string' && row.id.length > 0)
+					.slice(0, limit)
+					.map((row) => ({
+						id: row.id,
+						title: row.title || '',
+						meta: row.meta || '',
+						raw: {
+							id: row.id,
+							title: row.title || '',
+							itemKey: row.itemKey,
+							zoteroItemID: row.zoteroItemID,
+						},
+					}));
+			}
+		} catch (_err) {
+			// Keep cached result path as the fast default.
+		}
+
+		return cachedMatches;
+	}
+
 	async getCitationMapFor(scopePath: string, citekeys: string[]): Promise<Map<string, Record<string, unknown>>> {
 		const result = new Map<string, Record<string, unknown>>();
 		if (!citekeys.length) return result;
 
+		let entries: CitationIndexEntry[] = [];
 		try {
+			entries = await this.ensureCitationIndex(scopePath, false);
+		} catch (_err) {
+			entries = [];
+		}
+
+		if (entries.length > 0) {
+			const byId = new Map(entries.map((entry) => [entry.id, entry]));
+			const byCanonical = new Map<string, CitationIndexEntry>();
+			for (const entry of entries) {
+				const canonical = this.canonicalCitekey(entry.id);
+				if (!byCanonical.has(canonical)) {
+					byCanonical.set(canonical, entry);
+				}
+			}
+			for (const cite of citekeys) {
+				const direct = byId.get(cite);
+				if (direct) {
+					result.set(cite, this.enrichRawWithSourceInfo(cite, direct.raw));
+					continue;
+				}
+				const alias = byCanonical.get(this.canonicalCitekey(cite));
+				if (alias) {
+					result.set(cite, this.enrichRawWithSourceInfo(cite, alias.raw));
+				}
+			}
+		}
+
+		const unresolvedForLive = citekeys.filter((c) => !result.has(c) || !this.hasRoutingData(result.get(c)));
+		if (unresolvedForLive.length > 0) {
+			try {
 			const located = await locateCollection(scopePath);
-			const live = await resolveCitekeysToItems(citekeys, located.libraryId);
+				const live = await resolveCitekeysToItems(unresolvedForLive, located.libraryId);
 			for (const [key, raw] of live.entries()) {
 				result.set(key, this.enrichRawWithSourceInfo(key, raw as Record<string, unknown>));
 			}
-		} catch (_err) {
+			} catch (_err) {
 			// fall back to index path below
+			}
 		}
 
-		const missingAfterLive = citekeys.filter((c) => !result.has(c));
+		const missingAfterLive = citekeys.filter((c) => !result.has(c) || !this.hasRoutingData(result.get(c)));
 		if (missingAfterLive.length > 0) {
 			try {
 				const localApiMap = await resolveCitekeysToItemsViaLocalApi(missingAfterLive, scopePath);
@@ -1104,12 +1497,6 @@ export default class ZotsidianPlugin extends Plugin {
 		const missing = citekeys.filter((c) => !result.has(c));
 		if (missing.length === 0) return result;
 
-		let entries: CitationIndexEntry[] = [];
-		try {
-			entries = await this.ensureCitationIndex(scopePath, false);
-		} catch (_err) {
-			return result;
-		}
 		const byId = new Map(entries.map((e) => [e.id, e]));
 		const byCanonical = new Map<string, CitationIndexEntry>();
 		for (const entry of entries) {
@@ -1729,7 +2116,7 @@ export default class ZotsidianPlugin extends Plugin {
 			await this.initLeaf();
 			this.syncActiveBaseViewSupport(this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf());
 			if (this.settings.preloadIndexOnStartup) {
-				this.ensureCitationIndex(this.settings.defaultZoteroScope, true)
+				this.ensureCitationIndex(this.settings.defaultZoteroScope, false)
 					.catch((err) => console.error('Zotsidian index preload failed:', err));
 			}
 		});
@@ -1746,17 +2133,24 @@ export default class ZotsidianPlugin extends Plugin {
 	}
 
 	onunload() {
+		if (this._persistDataTimer != null) {
+			window.clearTimeout(this._persistDataTimer);
+			this._persistDataTimer = null;
+		}
 		this.clearBaseViewObserver();
 		this.hideBaseHoverCard();
 		// keep custom view attached per Obsidian plugin guidelines
 	}
 
 	async loadSettings() {
-		const loaded = await this.loadData();
-		const migrated = Object.assign({}, loaded);
+		const loaded = (await this.loadData()) as ZotsidianStoredData | null;
+		const migrated = Object.assign({}, loaded || {}) as Record<string, unknown>;
+		const rawInternal = migrated._internal;
+		delete migrated._internal;
 		if (typeof migrated.defaultZoteroScope !== 'string' && typeof migrated.defaultBibliographyPath === 'string') {
 			migrated.defaultZoteroScope = migrated.defaultBibliographyPath;
 		}
+		this._internalState = this.normalizeInternalState(rawInternal);
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, migrated);
 		if (!['pandoc', 'plain', 'wikilink'].includes(this.settings.citationInsertFormat)) {
 			this.settings.citationInsertFormat = 'pandoc';
@@ -1791,7 +2185,7 @@ export default class ZotsidianPlugin extends Plugin {
 			showJsonFallbackSettingInAdvanced: this.settings.showJsonFallbackSettingInAdvanced,
 		};
 		this.settings = cleanSettings;
-		await this.saveData(cleanSettings);
+		await this.saveData(this.buildStoredData());
 	}
 
 	get view() {

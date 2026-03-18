@@ -69,6 +69,48 @@
         vertical-align: middle;
     }   
 
+    .zotsidian-container-div .references-header .zotsidian-status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        margin-left: 8px;
+        font-size: var(--font-ui-smaller);
+        border: 1px solid var(--background-modifier-border);
+        color: var(--text-muted);
+        background: var(--background-secondary);
+        vertical-align: middle;
+    }
+
+    .zotsidian-container-div .references-header .zotsidian-status-pill.is-hidden {
+        display: none;
+    }
+
+    .zotsidian-container-div .references-header .zotsidian-status-pill.is-connected {
+        color: var(--color-green);
+        border-color: color-mix(in srgb, var(--color-green) 24%, var(--background-modifier-border));
+        background: color-mix(in srgb, var(--color-green) 12%, transparent);
+    }
+
+    .zotsidian-container-div .references-header .zotsidian-status-pill.is-loading {
+        color: var(--color-orange);
+        border-color: color-mix(in srgb, var(--color-orange) 24%, var(--background-modifier-border));
+        background: color-mix(in srgb, var(--color-orange) 12%, transparent);
+    }
+
+    .zotsidian-container-div .references-header .zotsidian-status-pill.is-degraded {
+        color: var(--color-yellow);
+        border-color: color-mix(in srgb, var(--color-yellow) 24%, var(--background-modifier-border));
+        background: color-mix(in srgb, var(--color-yellow) 12%, transparent);
+    }
+
+    .zotsidian-container-div .references-header .zotsidian-status-pill.is-offline {
+        color: var(--color-red);
+        border-color: color-mix(in srgb, var(--color-red) 24%, var(--background-modifier-border));
+        background: color-mix(in srgb, var(--color-red) 12%, transparent);
+    }
+
     .zotsidian-container-div .references-header button {
         --icon-size: var(--icon-xs);
         padding: 8px;
@@ -78,6 +120,10 @@
     .zotsidian-container-div .references-header .refresh-button{
         float: right;
         margin-left: 2px;
+    }
+
+    .zotsidian-container-div .references-header .refresh-button.is-loading svg {
+        animation: zotsidian-refresh-spin 0.9s linear infinite;
     }
 
     .zotsidian-container-div .references-header .sort-button{
@@ -97,6 +143,8 @@
 
     .zotsidian-container-div .pane-empty {
         margin-top: 30px;
+        color: var(--text-muted);
+        line-height: var(--line-height-normal);
     }
 
     .zotsidian-references-div, .zotsidian-bibliography-div, .zotsidian-annotations-div {
@@ -152,6 +200,11 @@
         font-style: italic;
     }
 
+}
+
+@keyframes zotsidian-refresh-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
 }
 
 @scope (.workspace-leaf-content[data-type="ReferencesView"], div.modal-container) {
@@ -411,6 +464,12 @@
     margin-bottom: 4px;
 }
 
+.zotsidian-source-attachment-count {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+    margin-left: 6px;
+}
+
 .zotsidian-source-empty {
     color: var(--text-faint);
 }
@@ -479,6 +538,111 @@
 
 .zotsidian-source-related {
     margin-top: 12px;
+}
+
+.zotsidian-source-annotations {
+    margin-top: 10px;
+    border-top: 1px solid var(--background-modifier-border);
+    padding-top: 8px;
+}
+
+.zotsidian-source-annotation-group {
+    margin-bottom: 12px;
+}
+
+.zotsidian-source-annotation-group-header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: var(--font-ui-small);
+}
+
+.zotsidian-source-annotation-group-header a {
+    font-weight: 600;
+}
+
+.zotsidian-source-annotation-group-count {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+}
+
+.zotsidian-source-annotation-list {
+    display: grid;
+    gap: 8px;
+}
+
+.zotsidian-source-annotation-card {
+    --annotation-color: var(--text-accent);
+    border: 1px solid var(--background-modifier-border);
+    border-left: 4px solid var(--annotation-color);
+    border-radius: 10px;
+    padding: 8px 10px;
+    background: var(--background-secondary);
+    cursor: pointer;
+    user-select: text;
+}
+
+.zotsidian-source-annotation-card:hover {
+    border-color: var(--background-modifier-border-hover);
+    background: var(--background-secondary-alt);
+}
+
+.zotsidian-source-annotation-card:focus-visible {
+    outline: 2px solid var(--interactive-accent);
+    outline-offset: 2px;
+}
+
+.zotsidian-source-annotation-topline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+}
+
+.zotsidian-source-annotation-badge {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.8em;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--background-modifier-border);
+    color: var(--text-normal);
+}
+
+.zotsidian-source-annotation-date {
+    color: var(--text-faint);
+}
+
+.zotsidian-source-annotation-color {
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    background: var(--annotation-color);
+    border: 1px solid var(--background-modifier-border);
+    flex: 0 0 auto;
+}
+
+.zotsidian-source-annotation-text {
+    white-space: pre-wrap;
+    line-height: 1.45;
+    color: var(--text-normal);
+}
+
+.zotsidian-source-annotation-comment {
+    margin-top: 6px;
+    white-space: pre-wrap;
+    line-height: 1.45;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.zotsidian-source-annotation-empty {
+    color: var(--text-faint);
+    font-size: var(--font-ui-small);
 }
 
 .zotsidian-source-inline-references-section {

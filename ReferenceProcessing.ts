@@ -49,6 +49,7 @@ export interface CollectionData {
     bibliography: string[];
     data: Map<string, object>;
     citations?: string[];
+    detectedCitations?: string[];
     error?: Error;
     annotationsMap: ItemAnnotationsMap
 }

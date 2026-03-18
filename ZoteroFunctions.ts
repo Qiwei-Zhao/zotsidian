@@ -792,7 +792,7 @@ export type AttachmentLookupHint = {
     title?: string;
 };
 
-const ENABLE_LOCAL_API_ANNOTATION_LOOKUP = false;
+const ENABLE_LOCAL_API_ANNOTATION_LOOKUP = true;
 
 function normalizeLocalApiAnnotation(entry: Record<string, unknown>): AttachmentAnnotation | null {
     const data = (entry.data ?? {}) as Record<string, unknown>;
@@ -1357,17 +1357,18 @@ async function attachmentsViaLocalApi(citeKey: string, located: LocationResult |
     }
 
     if (attachments.length === 0) {
+        const topLevelAnnotations = topLevelAnnotationsByParent.get(itemKey) || [];
         return [{
             open: zoteroSelectUri(libraryIdHint ?? '1', itemKey),
             path: true,
             label: 'Open in Zotero',
-            annotations: [],
+            annotations: topLevelAnnotations,
         }];
     }
 
     const ordered = [...attachments].sort((a, b) => Number(isPdfAttachment(b)) - Number(isPdfAttachment(a)));
-
-    return ordered.map((attachment) => {
+    const itemLevelAnnotations = topLevelAnnotationsByParent.get(itemKey) || [];
+    const attachmentRows = ordered.map((attachment) => {
         const openUri = isPdfAttachment(attachment)
             ? zoteroOpenPdfUri(libraryIdHint ?? '1', attachment.key)
             : (attachment.linkMode !== 'linked_url'
@@ -1380,6 +1381,17 @@ async function attachmentsViaLocalApi(citeKey: string, located: LocationResult |
             annotations: annotationsByParent.get(attachment.key) || [],
         };
     });
+
+    if (itemLevelAnnotations.length > 0) {
+        attachmentRows.push({
+            open: zoteroSelectUri(libraryIdHint ?? '1', itemKey),
+            path: true,
+            label: 'Open in Zotero',
+            annotations: itemLevelAnnotations,
+        });
+    }
+
+    return attachmentRows;
 }
 
 function normalizeRpcAttachmentPayload(result: unknown, citeKey: string): AttachmentResult[] | null {
