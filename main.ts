@@ -566,21 +566,18 @@ export default class ZotsidianPlugin extends Plugin {
 			if (!Array.isArray(rowValue)) continue;
 			if (typeof cachedAt !== 'number' || !Number.isFinite(cachedAt)) continue;
 			if (source !== 'live-export' && source !== 'local-api' && source !== 'json-fallback') continue;
-			const rows = rowValue
-				.filter((entry): entry is CitationIndexEntry => {
-					if (!entry || typeof entry !== 'object') return false;
-					const item = entry as Record<string, unknown>;
-					return typeof item.id === 'string' && typeof item.title === 'string' && typeof item.meta === 'string' && typeof item.raw === 'object' && item.raw !== null;
-				})
-				.map((entry) => {
-					const item = entry as Record<string, unknown>;
-					return {
-						id: item.id as string,
-						title: item.title as string,
-						meta: item.meta as string,
-						raw: item.raw as Record<string, unknown>,
-					};
-				});
+				const rows = rowValue
+					.filter((entry): entry is CitationIndexEntry => {
+						if (!entry || typeof entry !== 'object') return false;
+						const item = entry as Record<string, unknown>;
+						return typeof item.id === 'string' && typeof item.title === 'string' && typeof item.meta === 'string' && typeof item.raw === 'object' && item.raw !== null;
+					})
+					.map((entry) => ({
+						id: entry.id,
+						title: entry.title,
+						meta: entry.meta,
+						raw: entry.raw,
+					}));
 			if (rows.length === 0) continue;
 			state.citationIndexCacheByScope[scope] = {
 				rows,
