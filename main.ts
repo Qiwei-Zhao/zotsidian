@@ -8,6 +8,37 @@ import { createCitationHoverCardElement, createCitationHoverExtension } from 'Ed
 import { attachments, exportCollectionPath, normalizeExportItems, libraryCitekeysTitles, locateCollection, localApiLibraryIndex, resolveCitekeysToItems, resolveCitekeysToItemsViaLocalApi, type AttachmentLookupHint } from 'ZoteroFunctions';
 import { fetchSourceRelatedPapers, normalizeDoi, type SemanticRelatedPaper, type RelatedPapersProvider } from 'SemanticScholar';
 import { citationsInText, extractCitationMentions } from 'ReferenceProcessing';
+import {
+	buildDiscourseCanvasModel,
+	type DiscourseCanvasModel,
+	type DiscourseCanvasNodeEntry,
+} from 'DiscourseCanvasModel';
+import {
+	getDiscourseCanvasActivePageId,
+	getDiscourseCanvasGeometryHitFromModel,
+	getDiscourseCanvasViewport,
+	getRenderedDiscourseShapeElement,
+} from 'DiscourseCanvasGeometry';
+import {
+	resolveHoveredDiscoursePrimaryCitekeyFromModel,
+	resolveSelectedDiscourseContextFromModel,
+	resolveSelectedDiscourseSourceCitekeyFromModel,
+} from 'DiscourseCanvasSelection';
+import {
+	syncDiscourseHover,
+	syncDiscourseSelection,
+} from 'DiscourseCanvasSync';
+import {
+	getDiscourseStoreCameraRecord,
+	getDiscourseStoreCurrentPageId,
+	getDiscourseStoreCurrentPageState,
+	getDiscourseStoreHoveredShapeId,
+	getDiscourseStoreInstanceRecord,
+	getDiscourseStorePageStateRecord,
+	getDiscourseStoreRecords,
+	getDiscourseStoreSelectedShapeIds,
+	getDiscourseViewStore,
+} from 'DiscourseStore';
 
 export interface CitationIndexEntry {
 	id: string;
@@ -56,19 +87,6 @@ type InternalPluginState = {
 	citationIndexCacheByScope: Record<string, PersistedCitationIndexCache>;
 };
 
-type DiscourseCanvasNodeEntry = {
-	shapeId: string;
-	pageId: string;
-	x: number;
-	y: number;
-	w: number;
-	h: number;
-	title: string;
-	src: string;
-	nodeTypeId: string | null;
-	citekey: string | null;
-};
-
 export type DiscourseNodeTypeInfo = {
 	id: string;
 	name: string;
@@ -104,40 +122,11 @@ export type DiscourseNodeSidebarItem = {
 	targets: DiscourseNodeLocateTarget[];
 };
 
-type DiscourseCanvasTextEntry = {
-	shapeId: string;
-	pageId: string;
-	x: number;
-	y: number;
-	w: number;
-	h: number;
-	text: string;
-	citekeys: string[];
-	primaryCitekey: string | null;
-};
-
-type DiscourseCanvasCameraEntry = {
-	pageId: string;
-	x: number;
-	y: number;
-	z: number;
-};
-
 type NativeCanvasNodeEntry = {
 	id: string;
 	type: string;
 	text: string;
 	filePath: string | null;
-};
-
-type DiscourseCanvasModel = {
-	mtime: number;
-	nodes: Map<string, DiscourseCanvasNodeEntry>;
-	textShapes: DiscourseCanvasTextEntry[];
-	pageCitekeys: Map<string, string[]>;
-	cameras: Map<string, DiscourseCanvasCameraEntry>;
-	pageNames: Map<string, string>;
-	currentPageId: string | null;
 };
 
 type CachedDiscourseCanvasNodeMap = DiscourseCanvasModel;
@@ -894,13 +883,13 @@ export default class ZotsidianPlugin extends Plugin {
 			return;
 		}
 		const model = await this.getDiscourseCanvasModel(file);
-		const pageId = this.getDiscourseCanvasActivePageId(root, model);
+		const pageId = getDiscourseCanvasActivePageId(root, model);
 		const pageCitekeys = pageId ? (model.pageCitekeys.get(pageId) || []) : [];
 		const selectedCandidates = this.getSelectedDiscourseSourceNodeCandidates(root).map((candidate) => candidate.citekey);
 		const visibleTextFallback = citationsInText(root.innerText || root.textContent || '');
-		const storeCurrentPageId = this.getDiscourseStoreCurrentPageId(leaf);
-		const storeSelectedShapeIds = this.getDiscourseStoreSelectedShapeIds(leaf);
-		const storeHoveredShapeId = this.getDiscourseStoreHoveredShapeId(leaf);
+		const storeCurrentPageId = getDiscourseStoreCurrentPageId(leaf);
+		const storeSelectedShapeIds = getDiscourseStoreSelectedShapeIds(leaf);
+		const storeHoveredShapeId = getDiscourseStoreHoveredShapeId(leaf);
 		const snapshot = {
 			filePath: file.path,
 			pageId,
@@ -1509,7 +1498,7 @@ export default class ZotsidianPlugin extends Plugin {
 		const canvasInfo = this.getDiscourseCanvasLeafAndFileForPath(file.path);
 		const activePageId =
 			canvasInfo?.file.path === file.path
-				? this.getDiscourseStoreCurrentPageId(canvasInfo.leaf) || this.getDiscourseCanvasActivePageId(canvasInfo.root, model)
+				? getDiscourseStoreCurrentPageId(canvasInfo.leaf) || getDiscourseCanvasActivePageId(canvasInfo.root, model)
 				: model.currentPageId;
 		const pageId = activePageId || model.currentPageId || model.pageNames.keys().next().value || null;
 		if (!pageId) return [];
@@ -1695,7 +1684,7 @@ export default class ZotsidianPlugin extends Plugin {
 		const canvasInfo = this.getDiscourseCanvasLeafAndFileForPath(file.path);
 		const activePageId =
 			canvasInfo?.file.path === file.path
-				? this.getDiscourseStoreCurrentPageId(canvasInfo.leaf) || this.getDiscourseCanvasActivePageId(canvasInfo.root, model)
+				? getDiscourseStoreCurrentPageId(canvasInfo.leaf) || getDiscourseCanvasActivePageId(canvasInfo.root, model)
 				: model.currentPageId;
 		const pageId = activePageId || model.currentPageId || model.pageNames.keys().next().value || null;
 		if (!pageId) return [];
@@ -2180,7 +2169,7 @@ export default class ZotsidianPlugin extends Plugin {
 			await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
 		}
 
-		const rendered = this.getRenderedDiscourseShapeElement(canvasInfo.root, target.shapeId);
+		const rendered = getRenderedDiscourseShapeElement(canvasInfo.root, target.shapeId);
 		const model = await this.getDiscourseCanvasModel(file);
 		const waitFrames = async (count: number = 1) => {
 			for (let index = 0; index < count; index += 1) {
@@ -2250,7 +2239,7 @@ export default class ZotsidianPlugin extends Plugin {
 			if (file instanceof TFile) {
 				const model = this.getCachedDiscourseCanvasModel(file.path);
 				if (model) {
-					const pageId = this.getDiscourseCanvasActivePageId(root, model);
+					const pageId = getDiscourseCanvasActivePageId(root, model);
 					if (pageId) {
 						const ordered = model.pageCitekeys.get(pageId) || [];
 						this.discourseDebug('visible-citations', {
@@ -2443,193 +2432,12 @@ export default class ZotsidianPlugin extends Plugin {
 	}
 
 	private parseDiscourseCanvasRecords(records: Array<Record<string, unknown>>, mtime: number): DiscourseCanvasModel {
-		const nodes = new Map<string, DiscourseCanvasNodeEntry>();
-		const textShapes: DiscourseCanvasTextEntry[] = [];
-		const pageCitekeys = new Map<string, string[]>();
-		const cameras = new Map<string, DiscourseCanvasCameraEntry>();
-		const pageNames = new Map<string, string>();
-		let currentPageId: string | null = null;
-		const pushPageCitekey = (pageId: string, citekey: string | null) => {
-			const normalized = (citekey || '').replace(/^@+/, '').trim();
-			if (!pageId || !normalized) return;
-			const list = pageCitekeys.get(pageId) || [];
-			if (!list.includes(normalized)) {
-				list.push(normalized);
-				pageCitekeys.set(pageId, list);
-			}
-		};
-
-		for (const record of records) {
-			if (!record || typeof record !== 'object') continue;
-			const recordId = typeof record.id === 'string' ? record.id : '';
-			const typeName = typeof record.typeName === 'string' ? record.typeName : '';
-			if (typeName === 'instance' && typeof record.currentPageId === 'string') {
-				currentPageId = record.currentPageId;
-				continue;
-			}
-			if (typeName === 'page' && recordId.startsWith('page:')) {
-				const pageName = typeof record.name === 'string' ? record.name : recordId.replace(/^page:/, '');
-				pageNames.set(recordId, pageName);
-				continue;
-			}
-			if (typeName === 'camera' && typeof record.pageId === 'string') {
-				cameras.set(record.pageId, {
-					pageId: record.pageId,
-					x: typeof record.x === 'number' ? record.x : 0,
-					y: typeof record.y === 'number' ? record.y : 0,
-					z: typeof record.z === 'number' && record.z > 0 ? record.z : 1,
-				});
-				continue;
-			}
-
-			const shapeId = recordId;
-			if (!shapeId.startsWith('shape:')) continue;
-			const pageId = typeof record.parentId === 'string' ? record.parentId : '';
-			if (!pageId.startsWith('page:')) continue;
-			const safeProps = (record.props && typeof record.props === 'object') ? record.props as Record<string, unknown> : {};
-			const x = typeof record.x === 'number' ? record.x : 0;
-			const y = typeof record.y === 'number' ? record.y : 0;
-			const w = typeof safeProps.w === 'number' ? safeProps.w : 0;
-			const h = typeof safeProps.h === 'number' ? safeProps.h : 0;
-
-			if (record?.type === 'discourse-node') {
-				const title = typeof safeProps.title === 'string' ? safeProps.title : '';
-				const src = typeof safeProps.src === 'string' ? safeProps.src : '';
-				const nodeTypeId = typeof safeProps.nodeTypeId === 'string' ? safeProps.nodeTypeId : null;
-				const citekey = this.extractCitekeyFromDiscourseNodeTitle(title);
-				nodes.set(shapeId, {
-					shapeId,
-					pageId,
-					x,
-					y,
-					w,
-					h,
-					title,
-					src,
-					nodeTypeId,
-					citekey,
-				});
-				pushPageCitekey(pageId, citekey);
-				continue;
-			}
-
-			if (record?.type === 'text') {
-				const text = this.normalizeHoverText(
-					this.extractPlainTextFromTldrawRichText(safeProps.richText)
-					|| (typeof safeProps.text === 'string' ? safeProps.text : ''),
-				);
-				if (!text) continue;
-				const citekeys = citationsInText(text);
-				if (citekeys.length === 0) continue;
-				const size = typeof safeProps.size === 'string' ? safeProps.size : 'm';
-				textShapes.push({
-					shapeId,
-					pageId,
-					x,
-					y,
-					w,
-					h: h > 0 ? h : this.estimateDiscourseTextHeight(size, text),
-					text,
-					citekeys,
-					primaryCitekey: citekeys.length === 1 ? citekeys[0] : null,
-				});
-				for (const citekey of citekeys) {
-					pushPageCitekey(pageId, citekey);
-				}
-			}
-		}
-
-		return {
-			mtime,
-			nodes,
-			textShapes,
-			pageCitekeys,
-			cameras,
-			pageNames,
-			currentPageId,
-		};
-	}
-
-	private getDiscourseViewStore(leaf: WorkspaceLeaf | null): {
-		allRecords?: () => Array<Record<string, unknown>>;
-		records?: { values?: () => Iterable<Record<string, unknown>> };
-		get?: (id: string) => Record<string, unknown> | undefined;
-		has?: (id: string) => boolean;
-		put?: (records: Array<Record<string, unknown>>) => void;
-		atomic?: (cb: () => void) => void;
-		listen?: (cb: () => void) => (() => void) | void;
-	} | null {
-		const store = (leaf?.view as {
-			store?: {
-				allRecords?: () => Array<Record<string, unknown>>;
-				records?: { values?: () => Iterable<Record<string, unknown>> };
-				get?: (id: string) => Record<string, unknown> | undefined;
-				has?: (id: string) => boolean;
-				put?: (records: Array<Record<string, unknown>>) => void;
-				atomic?: (cb: () => void) => void;
-				listen?: (cb: () => void) => (() => void) | void;
-			};
-		} | undefined)?.store;
-		return store || null;
-	}
-
-	private getDiscourseStoreRecords(leaf: WorkspaceLeaf | null): Array<Record<string, unknown>> {
-		const store = this.getDiscourseViewStore(leaf);
-		if (!store) return [];
-		try {
-			if (typeof store.allRecords === 'function') {
-				return store.allRecords().filter((record): record is Record<string, unknown> => !!record && typeof record === 'object');
-			}
-			if (store.records && typeof store.records.values === 'function') {
-				return Array.from(store.records.values()).filter((record): record is Record<string, unknown> => !!record && typeof record === 'object');
-			}
-		} catch {
-			return [];
-		}
-		return [];
-	}
-
-	private getDiscourseStoreCurrentPageId(leaf: WorkspaceLeaf | null): string | null {
-		const records = this.getDiscourseStoreRecords(leaf);
-		const instance = records.find((record) => record?.typeName === 'instance' && typeof record.currentPageId === 'string');
-		return typeof instance?.currentPageId === 'string' ? instance.currentPageId : null;
-	}
-
-	private getDiscourseStoreCurrentPageState(leaf: WorkspaceLeaf | null): Record<string, unknown> | null {
-		const currentPageId = this.getDiscourseStoreCurrentPageId(leaf);
-		if (!currentPageId) return null;
-		return this.getDiscourseStorePageStateRecord(leaf, currentPageId);
-	}
-
-	private getDiscourseStorePageStateRecord(leaf: WorkspaceLeaf | null, pageId: string | null): Record<string, unknown> | null {
-		if (!pageId) return null;
-		const records = this.getDiscourseStoreRecords(leaf);
-		const pageState = records.find(
-			(record) => record?.typeName === 'instance_page_state' && record.pageId === pageId,
-		);
-		return pageState || null;
-	}
-
-	private getDiscourseStoreSelectedShapeIds(leaf: WorkspaceLeaf | null): string[] {
-		const pageState = this.getDiscourseStoreCurrentPageState(leaf);
-		const selected = pageState?.selectedShapeIds;
-		return Array.isArray(selected) ? selected.filter((id): id is string => typeof id === 'string') : [];
-	}
-
-	private getDiscourseStoreHoveredShapeId(leaf: WorkspaceLeaf | null): string | null {
-		const pageState = this.getDiscourseStoreCurrentPageState(leaf);
-		return typeof pageState?.hoveredShapeId === 'string' ? pageState.hoveredShapeId : null;
-	}
-
-	private getDiscourseStoreInstanceRecord(leaf: WorkspaceLeaf | null): Record<string, unknown> | null {
-		const records = this.getDiscourseStoreRecords(leaf);
-		return records.find((record) => record?.typeName === 'instance' && record.id === 'instance:instance') || null;
-	}
-
-	private getDiscourseStoreCameraRecord(leaf: WorkspaceLeaf | null, pageId: string | null): Record<string, unknown> | null {
-		if (!pageId) return null;
-		const records = this.getDiscourseStoreRecords(leaf);
-		return records.find((record) => record?.typeName === 'camera' && record.id === `camera:${pageId}`) || null;
+		return buildDiscourseCanvasModel(records, mtime, {
+			extractCitekeyFromDiscourseNodeTitle: (title) => this.extractCitekeyFromDiscourseNodeTitle(title),
+			extractPlainTextFromTldrawRichText: (richText) => this.extractPlainTextFromTldrawRichText(richText),
+			normalizeHoverText: (text) => this.normalizeHoverText(text),
+			estimateDiscourseTextHeight: (size, text) => this.estimateDiscourseTextHeight(size, text),
+		});
 	}
 
 	private getDiscourseLocateTargetBounds(
@@ -2654,7 +2462,7 @@ export default class ZotsidianPlugin extends Plugin {
 		targetBounds: { x: number; y: number; w: number; h: number } | null,
 	): { x: number; y: number; z: number } | null {
 		if (!targetBounds) return null;
-		const viewport = this.getDiscourseCanvasViewport(root);
+		const viewport = getDiscourseCanvasViewport(root);
 		const rect = viewport.getBoundingClientRect();
 		if (!rect.width || !rect.height) return null;
 		const nextZoom = currentCamera?.z && currentCamera.z > 0 ? currentCamera.z : 1;
@@ -2673,12 +2481,12 @@ export default class ZotsidianPlugin extends Plugin {
 		target: ReferenceLocateTarget,
 		model: DiscourseCanvasModel | null,
 	): boolean {
-		const store = this.getDiscourseViewStore(leaf);
+		const store = getDiscourseViewStore(leaf);
 		if (!store || typeof store.put !== 'function') return false;
 
-		const targetPageId = target.pageId || this.getDiscourseStoreCurrentPageId(leaf) || model?.currentPageId || null;
-		const instance = this.getDiscourseStoreInstanceRecord(leaf);
-		const pageState = this.getDiscourseStorePageStateRecord(leaf, targetPageId);
+		const targetPageId = target.pageId || getDiscourseStoreCurrentPageId(leaf) || model?.currentPageId || null;
+		const instance = getDiscourseStoreInstanceRecord(leaf);
+		const pageState = getDiscourseStorePageStateRecord(leaf, targetPageId);
 		if (!instance || !pageState || !targetPageId) return false;
 
 		const nextRecords: Record<string, unknown>[] = [];
@@ -2701,7 +2509,7 @@ export default class ZotsidianPlugin extends Plugin {
 			});
 		}
 
-		const camera = this.getDiscourseStoreCameraRecord(leaf, targetPageId);
+		const camera = getDiscourseStoreCameraRecord(leaf, targetPageId);
 		const nextCamera = this.computeDiscourseLocateCamera(
 			root,
 			camera ? {
@@ -2747,60 +2555,15 @@ export default class ZotsidianPlugin extends Plugin {
 	): Omit<SidebarSelectedContext, 'filePath'> | null {
 		const model = this.getCachedDiscourseCanvasModel(filePath);
 		if (!model) return null;
-		const selectedShapeIds = this.getDiscourseStoreSelectedShapeIds(leaf);
-		if (selectedShapeIds.length === 0) return null;
-		const currentPageId = this.getDiscourseStoreCurrentPageId(leaf) || model.currentPageId;
-		const scopedShapeIds = currentPageId
-			? selectedShapeIds.filter((shapeId) => {
-				const node = model.nodes.get(shapeId);
-				if (node) return node.pageId === currentPageId;
-				const text = model.textShapes.find((entry) => entry.shapeId === shapeId);
-				return text?.pageId === currentPageId;
-			})
-			: selectedShapeIds;
-		const shapeIds = scopedShapeIds.length > 0 ? scopedShapeIds : selectedShapeIds;
-		if (shapeIds.length === 0) return null;
-
-		const citekeys: string[] = [];
-		const pushCitekeys = (values: string[]) => {
-			for (const value of values) {
-				const clean = (value || '').replace(/^@+/, '').trim();
-				if (clean) citekeys.push(clean);
-			}
-		};
-
-		let singleKind: SidebarSelectedContextKind | null = null;
-		if (shapeIds.length === 1) {
-			const node = model.nodes.get(shapeIds[0]);
-			if (node?.citekey) {
-				singleKind = 'node';
-				pushCitekeys([node.citekey]);
-			} else {
-				const text = model.textShapes.find((entry) => entry.shapeId === shapeIds[0]);
-				if (text?.citekeys?.length) {
-					singleKind = text.citekeys.length === 1 ? 'text' : 'multi';
-					pushCitekeys(text.citekeys);
-				}
-			}
-		} else {
-			for (const shapeId of shapeIds) {
-				const node = model.nodes.get(shapeId);
-				if (node?.citekey) {
-					pushCitekeys([node.citekey]);
-					continue;
-				}
-				const text = model.textShapes.find((entry) => entry.shapeId === shapeId);
-				if (text?.citekeys?.length) {
-					pushCitekeys(text.citekeys);
-				}
-			}
-		}
-
-		const normalized = this.normalizeSidebarSelectedCitekeys(citekeys);
-		if (normalized.length === 0) return null;
+		const selectedShapeIds = getDiscourseStoreSelectedShapeIds(leaf);
+		const currentPageId = getDiscourseStoreCurrentPageId(leaf) || model.currentPageId;
+		const selected = resolveSelectedDiscourseContextFromModel(model, selectedShapeIds, currentPageId, {
+			normalizeCitekeys: (citekeys) => this.normalizeSidebarSelectedCitekeys(citekeys),
+		});
+		if (!selected) return null;
 		return {
-			kind: normalized.length > 1 ? 'multi' : (singleKind || 'multi'),
-			citekeys: normalized,
+			kind: selected.kind,
+			citekeys: selected.citekeys,
 			source: 'canvas-selection',
 		};
 	}
@@ -2808,11 +2571,11 @@ export default class ZotsidianPlugin extends Plugin {
 	private async resolveSelectedDiscourseNodeIdsFromStore(leaf: WorkspaceLeaf | null, filePath: string): Promise<string[]> {
 		const model = this.getCachedDiscourseCanvasModel(filePath);
 		if (!model) return [];
-		const selectedShapeIds = this.getDiscourseStoreSelectedShapeIds(leaf);
+		const selectedShapeIds = getDiscourseStoreSelectedShapeIds(leaf);
 		if (selectedShapeIds.length === 0) return [];
 		const file = this.resolveReferenceFile(filePath);
 		if (!(file instanceof TFile)) return [];
-		const currentPageId = this.getDiscourseStoreCurrentPageId(leaf) || model.currentPageId;
+		const currentPageId = getDiscourseStoreCurrentPageId(leaf) || model.currentPageId;
 		const shapeIds = currentPageId
 			? selectedShapeIds.filter((shapeId) => model.nodes.get(shapeId)?.pageId === currentPageId)
 			: selectedShapeIds;
@@ -2831,18 +2594,9 @@ export default class ZotsidianPlugin extends Plugin {
 	private resolveSelectedDiscourseSourceNodeFromStore(leaf: WorkspaceLeaf | null, filePath: string): string | null {
 		const model = this.getCachedDiscourseCanvasModel(filePath);
 		if (!model) return null;
-		const selectedShapeIds = this.getDiscourseStoreSelectedShapeIds(leaf);
-		if (selectedShapeIds.length === 0) return null;
-		const selectedNodes = selectedShapeIds
-			.map((shapeId) => model.nodes.get(shapeId))
-			.filter((entry): entry is DiscourseCanvasNodeEntry => !!entry && !!entry.citekey);
-		if (selectedNodes.length === 0) return null;
-		if (selectedNodes.length === 1) return selectedNodes[0].citekey || null;
-		const currentPageId = this.getDiscourseStoreCurrentPageId(leaf) || model.currentPageId;
-		const currentPageNodes = currentPageId
-			? selectedNodes.filter((entry) => entry.pageId === currentPageId)
-			: selectedNodes;
-		return currentPageNodes[0]?.citekey || selectedNodes[0]?.citekey || null;
+		const selectedShapeIds = getDiscourseStoreSelectedShapeIds(leaf);
+		const currentPageId = getDiscourseStoreCurrentPageId(leaf) || model.currentPageId;
+		return resolveSelectedDiscourseSourceCitekeyFromModel(model, selectedShapeIds, currentPageId);
 	}
 
 	private resolveHoveredDiscourseTextFromStore(
@@ -2850,22 +2604,22 @@ export default class ZotsidianPlugin extends Plugin {
 		filePath: string,
 		root: HTMLElement,
 	): { citekey: string; element: HTMLElement | null } | null {
-		const hoveredShapeId = this.getDiscourseStoreHoveredShapeId(leaf);
+		const hoveredShapeId = getDiscourseStoreHoveredShapeId(leaf);
 		if (!hoveredShapeId) return null;
 		const model = this.getCachedDiscourseCanvasModel(filePath);
 		if (!model) return null;
-		const textShape = model.textShapes.find((entry) => entry.shapeId === hoveredShapeId && !!entry.primaryCitekey);
-		if (!textShape?.primaryCitekey) return null;
+		const hovered = resolveHoveredDiscoursePrimaryCitekeyFromModel(model, hoveredShapeId);
+		if (!hovered) return null;
 		return {
-			citekey: textShape.primaryCitekey,
-			element: this.getRenderedDiscourseShapeElement(root, textShape.shapeId),
+			citekey: hovered.citekey,
+			element: getRenderedDiscourseShapeElement(root, hovered.shapeId),
 		};
 	}
 
 	private async getDiscourseCanvasModel(file: TFile): Promise<DiscourseCanvasModel> {
 		const liveCanvas = this.getDiscourseCanvasLeafAndFileForPath(file.path);
 		if (liveCanvas?.file.path === file.path) {
-			const liveRecords = this.getDiscourseStoreRecords(liveCanvas.leaf);
+			const liveRecords = getDiscourseStoreRecords(liveCanvas.leaf);
 			if (liveRecords.length > 0) {
 				const liveModel = this.parseDiscourseCanvasRecords(liveRecords, Date.now());
 				this._discourseCanvasNodesByFile.set(file.path, liveModel);
@@ -2908,91 +2662,6 @@ export default class ZotsidianPlugin extends Plugin {
 		return model.nodes;
 	}
 
-	private getDiscourseCanvasViewport(root: HTMLElement): HTMLElement {
-		return (
-			root.querySelector<HTMLElement>('.tl-canvas') ||
-			root.querySelector<HTMLElement>('.tl-canvas__canvas') ||
-			root.querySelector<HTMLElement>('.tl-shapes') ||
-			root
-		);
-	}
-
-	private getDiscourseCanvasActivePageId(root: HTMLElement, model: DiscourseCanvasModel): string | null {
-		const visibleShapeIds = Array.from(root.querySelectorAll<HTMLElement>('.tl-shape[data-shape-id], [data-shape-id^="shape:"]'))
-			.map((element) => element.getAttribute('data-shape-id') || '')
-			.filter(Boolean);
-		if (visibleShapeIds.length > 0) {
-			const counts = new Map<string, number>();
-			for (const shapeId of visibleShapeIds) {
-				const node = model.nodes.get(shapeId);
-				if (node?.pageId) {
-					counts.set(node.pageId, (counts.get(node.pageId) || 0) + 1);
-					continue;
-				}
-				const textShape = model.textShapes.find((entry) => entry.shapeId === shapeId);
-				if (textShape?.pageId) {
-					counts.set(textShape.pageId, (counts.get(textShape.pageId) || 0) + 1);
-				}
-			}
-			const ranked = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
-			if (ranked[0]?.[0]) {
-				return ranked[0][0];
-			}
-		}
-		if (model.currentPageId) return model.currentPageId;
-		return model.pageNames.keys().next().value || null;
-	}
-
-	private discourseCanvasClientToPagePoint(
-		root: HTMLElement,
-		model: DiscourseCanvasModel,
-		pageId: string,
-		clientX: number,
-		clientY: number
-	): { x: number; y: number } | null {
-		const viewport = this.getDiscourseCanvasViewport(root);
-		const rect = viewport.getBoundingClientRect();
-		if (!rect.width || !rect.height) return null;
-		const camera = model.cameras.get(pageId) || { pageId, x: 0, y: 0, z: 1 };
-		const z = camera.z && camera.z > 0 ? camera.z : 1;
-		return {
-			x: (clientX - rect.left) / z + camera.x,
-			y: (clientY - rect.top) / z + camera.y,
-		};
-	}
-
-	private getRenderedDiscourseShapeElement(root: HTMLElement, shapeId: string): HTMLElement | null {
-		const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(shapeId) : shapeId.replace(/"/g, '\\"');
-		return root.querySelector<HTMLElement>(`.tl-shape[data-shape-id="${escaped}"], [data-shape-id="${escaped}"]`);
-	}
-
-	private hitTestDiscourseNode(
-		model: DiscourseCanvasModel,
-		pageId: string,
-		pageX: number,
-		pageY: number
-	): DiscourseCanvasNodeEntry | null {
-		const candidates = Array.from(model.nodes.values())
-			.filter((entry) => entry.pageId === pageId && entry.citekey)
-			.filter((entry) => pageX >= entry.x && pageX <= entry.x + entry.w && pageY >= entry.y && pageY <= entry.y + entry.h)
-			.sort((a, b) => (a.w * a.h) - (b.w * b.h));
-		return candidates[0] || null;
-	}
-
-	private hitTestDiscourseTextShape(
-		model: DiscourseCanvasModel,
-		pageId: string,
-		pageX: number,
-		pageY: number
-	): DiscourseCanvasTextEntry | null {
-		const margin = 6;
-		const candidates = model.textShapes
-			.filter((entry) => entry.pageId === pageId && entry.primaryCitekey)
-			.filter((entry) => pageX >= entry.x - margin && pageX <= entry.x + entry.w + margin && pageY >= entry.y - margin && pageY <= entry.y + entry.h + margin)
-			.sort((a, b) => (a.w * a.h) - (b.w * b.h));
-		return candidates[0] || null;
-	}
-
 	private async getDiscourseCanvasGeometryHit(
 		file: TFile,
 		root: HTMLElement,
@@ -3000,7 +2669,9 @@ export default class ZotsidianPlugin extends Plugin {
 		clientY: number
 	): Promise<{ citekey: string; element: HTMLElement | null; kind: 'node' | 'text' } | null> {
 		const model = await this.getDiscourseCanvasModel(file);
-		return this.getDiscourseCanvasGeometryHitFromModel(root, model, clientX, clientY);
+		return getDiscourseCanvasGeometryHitFromModel(root, model, clientX, clientY, {
+			pointInRect: (x, y, rect) => this.pointInRect(x, y, rect),
+		});
 	}
 
 	private getCachedDiscourseCanvasGeometryHit(
@@ -3011,112 +2682,9 @@ export default class ZotsidianPlugin extends Plugin {
 	): { citekey: string; element: HTMLElement | null; kind: 'node' | 'text' } | null {
 		const model = this.getCachedDiscourseCanvasModel(filePath);
 		if (!model) return null;
-		return this.getDiscourseCanvasGeometryHitFromModel(root, model, clientX, clientY);
-	}
-
-	private getDiscourseRenderedShapeRectHit(
-		root: HTMLElement,
-		model: DiscourseCanvasModel,
-		pageId: string,
-		clientX: number,
-		clientY: number
-	): { citekey: string; element: HTMLElement | null; kind: 'node' | 'text' } | null {
-		const hits: Array<{ citekey: string; element: HTMLElement; kind: 'node' | 'text'; area: number; distance: number; containsPoint: boolean }> = [];
-
-		for (const entry of model.nodes.values()) {
-			if (entry.pageId !== pageId || !entry.citekey) continue;
-			const element = this.getRenderedDiscourseShapeElement(root, entry.shapeId);
-			if (!(element instanceof HTMLElement)) continue;
-			const rect = element.getBoundingClientRect();
-			const containsPoint = this.pointInRect(clientX, clientY, rect);
-			const margin = 10;
-			const near =
-				clientX >= rect.left - margin &&
-				clientX <= rect.right + margin &&
-				clientY >= rect.top - margin &&
-				clientY <= rect.bottom + margin;
-			if (!containsPoint && !near) continue;
-			const cx = rect.left + rect.width / 2;
-			const cy = rect.top + rect.height / 2;
-			hits.push({
-				citekey: entry.citekey,
-				element,
-				kind: 'node',
-				area: Math.max(1, rect.width * rect.height),
-				distance: Math.hypot(clientX - cx, clientY - cy),
-				containsPoint,
-			});
-		}
-
-		for (const entry of model.textShapes) {
-			if (entry.pageId !== pageId || !entry.primaryCitekey) continue;
-			const element = this.getRenderedDiscourseShapeElement(root, entry.shapeId);
-			if (!(element instanceof HTMLElement)) continue;
-			const rect = element.getBoundingClientRect();
-			const containsPoint = this.pointInRect(clientX, clientY, rect);
-			const margin = 8;
-			const near =
-				clientX >= rect.left - margin &&
-				clientX <= rect.right + margin &&
-				clientY >= rect.top - margin &&
-				clientY <= rect.bottom + margin;
-			if (!containsPoint && !near) continue;
-			const cx = rect.left + rect.width / 2;
-			const cy = rect.top + rect.height / 2;
-			hits.push({
-				citekey: entry.primaryCitekey,
-				element,
-				kind: 'text',
-				area: Math.max(1, rect.width * rect.height),
-				distance: Math.hypot(clientX - cx, clientY - cy),
-				containsPoint,
-			});
-		}
-
-		if (hits.length === 0) return null;
-		hits.sort((a, b) => {
-			if (a.containsPoint !== b.containsPoint) return a.containsPoint ? -1 : 1;
-			if (a.kind !== b.kind) return a.kind === 'node' ? -1 : 1;
-			return a.distance - b.distance || a.area - b.area;
+		return getDiscourseCanvasGeometryHitFromModel(root, model, clientX, clientY, {
+			pointInRect: (x, y, rect) => this.pointInRect(x, y, rect),
 		});
-		const winner = hits[0];
-		return { citekey: winner.citekey, element: winner.element, kind: winner.kind };
-	}
-
-	private getDiscourseCanvasGeometryHitFromModel(
-		root: HTMLElement,
-		model: DiscourseCanvasModel,
-		clientX: number,
-		clientY: number
-	): { citekey: string; element: HTMLElement | null; kind: 'node' | 'text' } | null {
-		const pageId = this.getDiscourseCanvasActivePageId(root, model);
-		if (!pageId) return null;
-
-		const renderedHit = this.getDiscourseRenderedShapeRectHit(root, model, pageId, clientX, clientY);
-		if (renderedHit) return renderedHit;
-
-		const point = this.discourseCanvasClientToPagePoint(root, model, pageId, clientX, clientY);
-		if (!point) return null;
-
-		const nodeHit = this.hitTestDiscourseNode(model, pageId, point.x, point.y);
-		if (nodeHit?.citekey) {
-			return {
-				citekey: nodeHit.citekey,
-				element: this.getRenderedDiscourseShapeElement(root, nodeHit.shapeId),
-				kind: 'node',
-			};
-		}
-
-		const textHit = this.hitTestDiscourseTextShape(model, pageId, point.x, point.y);
-		if (textHit?.primaryCitekey) {
-			return {
-				citekey: textHit.primaryCitekey,
-				element: this.getRenderedDiscourseShapeElement(root, textHit.shapeId),
-				kind: 'text',
-			};
-		}
-
-		return null;
 	}
 
 	private getDiscourseCanvasShapeIdFromEvent(event: MouseEvent, root: HTMLElement): string | null {
@@ -3618,7 +3186,7 @@ export default class ZotsidianPlugin extends Plugin {
 	private resolveSelectedDiscourseSourceNodeFromSelectionBox(root: HTMLElement, filePath: string): string | null {
 		const model = this.getCachedDiscourseCanvasModel(filePath);
 		if (!model) return null;
-		const pageId = this.getDiscourseCanvasActivePageId(root, model);
+		const pageId = getDiscourseCanvasActivePageId(root, model);
 		if (!pageId) return null;
 		const selectionRect = this.getDiscourseSelectionForegroundRect(root);
 		if (!selectionRect) return null;
@@ -3626,7 +3194,7 @@ export default class ZotsidianPlugin extends Plugin {
 		const hits = Array.from(model.nodes.values())
 			.filter((entry) => entry.pageId === pageId && !!entry.citekey)
 			.map((entry) => {
-				const element = this.getRenderedDiscourseShapeElement(root, entry.shapeId);
+				const element = getRenderedDiscourseShapeElement(root, entry.shapeId);
 				if (!(element instanceof HTMLElement)) return null;
 				const rect = element.getBoundingClientRect();
 				if (rect.width <= 0 || rect.height <= 0) return null;
@@ -4022,7 +3590,7 @@ export default class ZotsidianPlugin extends Plugin {
 			window.clearInterval(this._discourseStatePollTimer);
 			this._discourseStatePollTimer = null;
 		}
-		if (this.getDiscourseViewStore(leaf)?.listen) {
+		if (getDiscourseViewStore(leaf)?.listen) {
 			return;
 		}
 		const run = () => {
@@ -4034,34 +3602,20 @@ export default class ZotsidianPlugin extends Plugin {
 	}
 
 	private async syncDiscourseSelectionForLeaf(leaf: WorkspaceLeaf | null, filePath: string) {
-		const root = this.getBaseViewRoot(leaf);
-		if (!(root instanceof HTMLElement)) {
-			this.discourseSelectionSyncDebugOnce('selection-sync-no-root', { filePath });
-			await this.clearSidebarSelectedContext(filePath);
-			await this.clearSidebarFocusedDiscourseNodes(filePath);
-			return;
-		}
-		const selectedNodeIds = await this.resolveSelectedDiscourseNodeIdsFromStore(leaf, filePath);
-		if (selectedNodeIds.length > 0) {
-			await this.setSidebarFocusedDiscourseNodes(selectedNodeIds, filePath, 'canvas-selection');
-		} else if (this._sidebarFocusedDiscourseNodes?.filePath === filePath && this._sidebarFocusedDiscourseNodes.source === 'canvas-selection') {
-			await this.clearSidebarFocusedDiscourseNodes(filePath);
-		}
-		const selected = this.resolveSelectedDiscourseContextForLeaf(root, filePath, leaf);
-		if (selected) {
-			this.discourseSelectionSyncDebugOnce('selection-sync-using-selected-context', {
-				filePath,
-				selected,
-			});
-			await this.setSidebarSelectedContext(selected, filePath);
-			return;
-		}
-		if (Date.now() < this._discourseLocateSuppressUntil) {
-			this.discourseSelectionSyncDebugOnce('selection-sync-suppressed-clear', { filePath });
-			return;
-		}
-		this.discourseSelectionSyncDebugOnce('selection-sync-clearing-focus', { filePath });
-		await this.clearSidebarSelectedContext(filePath);
+		await syncDiscourseSelection({
+			filePath,
+			leaf,
+			locateSuppressUntil: this._discourseLocateSuppressUntil,
+			getRoot: (targetLeaf) => this.getBaseViewRoot(targetLeaf),
+			resolveSelectedNodeIds: (targetLeaf, targetFilePath) => this.resolveSelectedDiscourseNodeIdsFromStore(targetLeaf, targetFilePath),
+			resolveSelectedContext: (targetLeaf, targetFilePath, root) => this.resolveSelectedDiscourseContextForLeaf(root, targetFilePath, targetLeaf),
+			getFocusedDiscourseState: () => this._sidebarFocusedDiscourseNodes,
+			debugOnce: (label, payload) => this.discourseSelectionSyncDebugOnce(label, payload),
+			setFocusedNodes: (nodeIds, targetFilePath) => this.setSidebarFocusedDiscourseNodes(nodeIds, targetFilePath, 'canvas-selection'),
+			clearFocusedNodes: (targetFilePath) => this.clearSidebarFocusedDiscourseNodes(targetFilePath),
+			setSelectedContext: (context, targetFilePath) => this.setSidebarSelectedContext(context, targetFilePath),
+			clearSelectedContext: (targetFilePath) => this.clearSidebarSelectedContext(targetFilePath),
+		});
 	}
 
 	private scheduleDiscourseHoverSync(leaf: WorkspaceLeaf | null, filePath: string, delayMs: number = 0) {
@@ -4071,35 +3625,30 @@ export default class ZotsidianPlugin extends Plugin {
 	}
 
 	private async syncDiscourseHoverForLeaf(leaf: WorkspaceLeaf | null, filePath: string) {
-		if (!this.settings.showCitationHoverCard) {
-			this.hideBaseHoverCard();
-			return;
-		}
-		const root = this.getBaseViewRoot(leaf);
-		if (!(root instanceof HTMLElement)) {
-			this.hideBaseHoverCard();
-			return;
-		}
-		const hovered = this.resolveHoveredDiscourseTextFromStore(leaf, filePath, root);
-		if (!hovered?.citekey || !(hovered.element instanceof HTMLElement)) {
-			this.hideBaseHoverCard();
-			return;
-		}
-		const anchor = hovered.element;
-		if (this._baseHoverTargetEl === anchor && this._baseHoverCardEl?.isConnected && this._baseHoverRootEl === root) {
-			if (this._baseHoverHideTimer != null) {
-				window.clearTimeout(this._baseHoverHideTimer);
-				this._baseHoverHideTimer = null;
-			}
-			this.clearBaseHoverSwitchTimer();
-			this.positionBaseHoverCard(this._baseHoverCardEl, anchor, root);
-			return;
-		}
-		if (this._baseHoverCardEl?.isConnected && this._baseHoverTargetEl) {
-			this.scheduleSwitchBaseHoverCard(anchor, hovered.citekey, root);
-			return;
-		}
-		this.showBaseHoverCard(anchor, hovered.citekey, root);
+		await syncDiscourseHover({
+			filePath,
+			leaf,
+			showCitationHoverCard: this.settings.showCitationHoverCard,
+			getRoot: (targetLeaf) => this.getBaseViewRoot(targetLeaf),
+			resolveHoveredText: (targetLeaf, targetFilePath, root) => this.resolveHoveredDiscourseTextFromStore(targetLeaf, targetFilePath, root),
+			hideHoverCard: () => this.hideBaseHoverCard(),
+			isCurrentHoverTarget: (anchor, root) => this._baseHoverTargetEl === anchor && !!this._baseHoverCardEl?.isConnected && this._baseHoverRootEl === root,
+			hasConnectedHoverCard: () => !!(this._baseHoverCardEl?.isConnected && this._baseHoverTargetEl),
+			positionCurrentHoverCard: (anchor, root) => {
+				if (this._baseHoverCardEl) {
+					this.positionBaseHoverCard(this._baseHoverCardEl, anchor, root);
+				}
+			},
+			scheduleSwitchHoverCard: (anchor, citekey, root) => this.scheduleSwitchBaseHoverCard(anchor, citekey, root),
+			showHoverCard: (anchor, citekey, root) => this.showBaseHoverCard(anchor, citekey, root),
+			clearHideTimer: () => {
+				if (this._baseHoverHideTimer != null) {
+					window.clearTimeout(this._baseHoverHideTimer);
+					this._baseHoverHideTimer = null;
+				}
+			},
+			clearSwitchTimer: () => this.clearBaseHoverSwitchTimer(),
+		});
 	}
 
 	private handleDocumentMouseDown(event: MouseEvent) {
