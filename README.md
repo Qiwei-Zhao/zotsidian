@@ -1,52 +1,46 @@
 # Zotsidian
 
-Zotsidian is an Obsidian desktop plugin for Zotero(Zotero 8)-first writing and literature management. It is primarily inspired by [zotero-roam](https://github.com/alixlahuec/zotero-roam) by Alix Lahuec which is most amazing extension I have ever used for zotero. Unfortunately, it seems no longer oftern maintained and does not work with the latest versions of Zotero and not compatible with Obsidian. Also inspired by [obsidian-deepsit](https://github.com/bassio/obsidian-deepsit), I (let AI, i.e., Codex GPT-5.4) made Zotsidian to be a more integrated and seamless experience for Obsidian users, with features like inline citation autocomplete, a dedicated references sidebar, source page enrichment, and citation hover cards.
+[English](./README.md) | [简体中文](./README.zh-CN.md)
 
-![Zotsidian overview](./gifs/image.png)
+Zotsidian is an Obsidian desktop extension for Zotero 8-first writing, source pages, annotations, and discourse graph workflows.
 
-It is built around four core capabilities:
+It started from a simple citation workflow idea inspired by [zotero-roam](https://github.com/alixlahuec/zotero-roam) and [obsidian-deepsit](https://github.com/bassio/obsidian-deepsit), and has grown into a more integrated Zotero-to-Obsidian workflow layer with support for [discourse-graphs](https://github.com/DiscourseGraphs/discourse-graph), built with AI-assisted development. Note: the extension has not been tested properly, please feel free to report any issues and suggestions.
 
-1. Citation insert
+![Zotsidian cover](./gifs/cover.png)
+
+## Highlights
+
+Zotsidian is built around five practical capabilities:
+
+
+1. Citation workflow
    - insert citations with inline `@` autocomplete
-   - insert citations from a dedicated search panel
-2. References sidebar
-   - show the reference information for the citations used in the current page
-3. Source page sidebar
-   - when the current note is a paper note like `@citekey`, show that paper's metadata, references, citations, and related library items
-4. Citation hover cards
-   - hover a citekey to preview metadata and jump directly to a local PDF or Zotero item
+   - search Zotero from a dedicated panel
+   - inspect citekeys with hover cards
+3. References sidebar
+   - inspect the references used in the active note without leaving the page
+   - sort and focus citations while writing
+4. Source page workspace
+   - treat `@citekey` notes as paper dashboards
+   - view metadata, attachments, related items, discourse nodes, and references together
+5. Zotero annotations
+   - filter, copy, open, and insert highlights or images directly into your notes
+5. Discourse graph canvas support
+   - integrate with `discourse-graphs` canvas
+   - detect source nodes, citation text, and discourse nodes
+   - highlight sidebar items from canvas selections
+   - jump back from sidebar targets into canvas
 
-The plugin is designed for two writing styles:
+## Core Features
 
-- a lightweight style, where you mainly write in normal notes and use citations directly
-- a source-page style, where some or all papers also get their own `@citekey` notes
+### 1. Citation Insert and Hover Cards
 
-## Core features
+Zotsidian supports two citation entry modes:
 
-### 1. Citation insert
+- inline `@` autocomplete inside the editor
+- a dedicated Zotero search panel
 
-Zotsidian supports two citation entry modes.
-
-#### Inline `@` autocomplete
-
-Type `@` in the editor to trigger citation suggestions.
-
-This is the fastest way to cite while drafting.
-
-![Inline citation autocomplete](./gifs/inline_citation.gif)
-
-#### Search panel
-
-Open the command `Zotsidian: Open Zotero Search Panel` from the command palette, or use the default hotkey:
-
-- macOS: `Cmd+Shift+U`
-- Windows/Linux: `Ctrl+Shift+U`
-
-This is useful when you want a broader search workflow than inline autocomplete.
-
-![Search panel](./gifs/search_panel.gif)
-
-#### Supported citation output formats
+Hover cards let you inspect a citekey without leaving your current context. They work especially well for lightweight writing when you want citation lookup without opening a source page.
 
 Inserted citations can be configured as:
 
@@ -56,95 +50,96 @@ Inserted citations can be configured as:
 
 All three formats are treated as formal citations by the plugin.
 
-### 2. References sidebar
+![Citation search and hover workflow](./gifs/search_citaiton_card.png)
 
-For normal notes, the right sidebar shows the reference information for the citations found in the current page.
+### 2. References Sidebar
 
-This means you can keep writing in the main editor while inspecting references in parallel.
+For normal notes, the right sidebar shows the references used in the active page.
+
+This supports a writing-first workflow: keep drafting in the main editor while inspecting references, sorting them, and jumping to cited occurrences in parallel.
 
 The References sidebar supports:
 
-- references extracted from the active Markdown note, Obsidian Base view, Obsidian canvas
-- direct links to PDF, Zotero, and source page
-- sorting by:
-  - insertion order
-  - year, newest first
-  - author + year
+- Normal obsidian notes
+- obsidian base
+- discourse-graphs canvas
+- native Obsidian canvas
 
-This is particularly useful for article drafting, thesis writing, and literature review notes.
+Sorting modes:
+- insertion order
+- year, newest first
+- author + year
 
-![References sidebar](./gifs/reference.gif)
+Highlight the current input line's citation in the sidebar. Clicking the number buttion in the sidebar, jump back to the citaiton line. Discouse graph nodes supported as well.
 
-### 3. Source page sidebar
+![References sidebar](./gifs/sidebar_reference.png)
+
+### 3. Source Page Workspace
 
 A source page is a note named `@citekey`.
 
-When the active note is a source page, the right sidebar switches to a source-oriented view and can show:
+When the active note is a source page, the sidebar becomes a paper workspace and can show:
 
 - Zotero metadata
 - attachment links
 - external links such as Zotero, Semantic Scholar, Google Scholar, and Connected Papers
+- filtered Zotero annotations
+- insert / copy / open actions for annotations with one click
 - references of the current paper
 - citations of the current paper
-- related library items already present in your Obsidian/Zotero workflow
-- references that appear inside the source note body itself
+- related library items already present in your Obsidian / Zotero workflow
+- discourse graph nodes detected in the note body
 
-This is the more structured workflow, useful when you want a durable note for an important paper.
+![Source page workspace](./gifs/siderbar_source.png)
 
-![Source page sidebar](./gifs/source_page.gif)
+### 4. Discourse Graph Canvas Support
 
-### 4. Citation hover cards
+Zotsidian has dedicated support for the [discourse-graphs](https://github.com/DiscourseGraphs/discourse-graph) Obsidian plugin.
 
-Hover cards let you inspect a citekey without leaving your current context.
+On discourse canvas pages, the sidebar can detect:
 
-They work in:
+- source nodes such as `@citekey`
+- discourse nodes such as claim / evidence / question / source
+- citation text shapes
 
-- the Markdown editor
-- the References sidebar
-- Obsidian Base views
+It supports:
 
-Hover cards can show:
+- sidebar highlighting from canvas selection
+- reverse jump from sidebar occurrence buttons back into canvas
+- discourse node type filtering inside the sidebar
 
-- title
-- authors
-- venue and year
-- DOI
-- whether the item is available in the local Zotero library
-- local PDF links
-- Zotero item links
-- source-page links
-- Semantic Scholar / Google Scholar / Connected Papers fallbacks
+This is currently the strongest graph workflow in the plugin and one of the main differentiators of Zotsidian.
 
-This is useful when you only want lightweight citation-driven writing and do not want to create a new note for every paper.
+![Discourse graph canvas support](./gifs/sidebar_discourse_graph_canvas.png)
 
-![Citation hover card](./gifs/hover.gif)
+## Lightweight Native Base and Canvas Support
 
-## Obsidian Base support
-
-Zotsidian can read visible citekeys from active Base views.
+Zotsidian also provides lightweight support for native Obsidian Base and native Canvas.
 
 That means:
 
-- the References sidebar can work from Base pages
-- hover cards can work on citation tokens shown in Base tables
+- reference extraction can work from those pages
+- citation hover cards can still be useful in lightweight workflows
 
-This is useful when your literature workflow uses Base as a table or dashboard layer. For example, use the base to organize and filter papers to a research project.
+This support is intentionally simpler than the discourse-graphs integration. The full bidirectional graph workflow is designed for discourse-graphs canvas, not native Canvas.
 
-## Defaults on a fresh install
+## Related Papers and External Providers
 
-Zotsidian defaults are intentionally conservative:
+For source pages with a DOI or a usable title, Zotsidian can fetch:
 
-- Citation insert format: `[@citekey]`
-- Create source page on citation select: off
-- Load attachment links in source panel: on
-- Source pages folder: `source`
-- Source page template path: empty
-- Related papers provider: `Auto (Recommended)`
-- Search panel hotkey: `Cmd+Shift+U` / `Ctrl+Shift+U`
+- references
+- citations
+- related library items already present in your Zotero-backed note system
 
-These defaults favor direct writing first, and source-page creation only when the user explicitly wants it.
+Provider modes:
 
-## Do you need Better BibTeX?
+- `Auto (Recommended)`
+- `Semantic Scholar only`
+- `OpenAlex only`
+
+Recommended mode tries Semantic Scholar first and falls back to OpenAlex when Semantic Scholar is rate-limited or incomplete.
+
+## Do You Need Better BibTeX?
 
 ### Better BibTeX plugin
 
@@ -161,31 +156,19 @@ Zotero 8 provides a native `Citation Key` field, but it does not reliably genera
 
 If you already maintain valid citation keys by some other method, Zotsidian can use them. But for most real workflows, Better BibTeX should be treated as a practical requirement.
 
-### Better BibTeX JSON export
+## Defaults on a Fresh Install
 
-No, this is not required for the main workflow.
+Zotsidian defaults are intentionally conservative:
 
-The primary Zotsidian workflow is based on Zotero Desktop 8 and live local lookup.
+- Citation insert format: `[@citekey]`
+- Create source page on citation select: off
+- Load attachment links in source panel: on
+- Source pages folder: `source`
+- Source page template path: empty
+- Related papers provider: `Auto (Recommended)`
+- Search panel hotkey: `Cmd+Shift+U` / `Ctrl+Shift+U`
 
-`Local JSON fallback path` is only an advanced fallback when live Zotero lookup is incomplete.
-
-Most users should not need a JSON export.
-
-## Related papers and external providers
-
-For source pages with a DOI or a usable title, Zotsidian can fetch:
-
-- references
-- citations
-- related library items already present in your Zotero-backed note system
-
-Provider modes:
-
-- `Auto (Recommended)`
-- `Semantic Scholar only`
-- `OpenAlex only`
-
-Recommended mode tries Semantic Scholar first and falls back to OpenAlex when Semantic Scholar is rate-limited or incomplete.
+These defaults favor direct writing first, and source-page creation only when the user explicitly wants it.
 
 ## Requirements
 
@@ -198,7 +181,7 @@ Recommended mode tries Semantic Scholar first and falls back to OpenAlex when Se
 
 ### Required for the full local workflow
 
-Zotsidian is designed around live local resolution against Zotero Desktop. For citation lookup, hover cards, PDF opening, Zotero item opening, and source-page enrichment to work reliably:
+Zotsidian is designed around live local resolution against Zotero Desktop. For citation lookup, hover cards, PDF opening, Zotero item opening, source-page enrichment, and annotation workflows to work reliably:
 
 - Zotero Desktop should be running while you use Obsidian
 - your cited items should exist in the local Zotero library you want to query
@@ -215,15 +198,20 @@ If Zotero Desktop is closed, some local-library features will degrade or stop wo
 - opening local PDFs
 - opening Zotero items
 - attachment discovery in the source sidebar
+- annotation refresh and insert workflows
 
 ### Optional but recommended
 
 - PDF attachments stored in Zotero, if you want `Open PDF` actions to work
-- DOI or at least a usable title on a source item, if you want related references/citations to resolve well
+- DOI or at least a usable title on a source item, if you want related references / citations to resolve well
 - internet access for:
   - Semantic Scholar / OpenAlex related-paper lookup
   - Connected Papers
   - Google Scholar
+
+### Optional integration
+
+- the `discourse-graphs` Obsidian plugin, if you want discourse canvas support
 
 ### Optional advanced fallback
 
@@ -252,7 +240,7 @@ This is the recommended installation method before Zotsidian is available in the
 Important:
 
 - In Zotero, go to `Settings / Preferences -> Advanced` and make sure `Allow other applications on this computer to communicate with Zotero` is enabled.
-- If this option is off, Zotsidian may fail to load citation indexes, attachments, and hover data.
+- If this option is off, Zotsidian may fail to load citation indexes, attachments, hover data, and annotation content.
 
 ### Manual installation from source
 
@@ -292,7 +280,7 @@ This will watch the source and rebuild `main.js` automatically.
 
 You still need to copy the built files into your vault plugin folder, or symlink the project into `.obsidian/plugins/zotsidian` if you prefer a development setup.
 
-## Quick start
+## Quick Start
 
 1. Start Zotero Desktop
 2. In Zotero, go to `Settings / Preferences -> Advanced` and enable `Allow other applications on this computer to communicate with Zotero`
@@ -305,9 +293,10 @@ You still need to copy the built files into your vault plugin folder, or symlink
    - `Create source page on citation select`
    - `Source pages folder`
 6. Type `@` in a note and insert a citation
-7. Hover the citation to open the PDF or Zotero item
+7. Hover the citation to inspect metadata or open the PDF / Zotero item
 8. Use the References sidebar to inspect cited papers
 9. If needed, open or create an `@citekey` source page for deeper inspection
+10. If you use discourse-graphs, open a discourse canvas and let the sidebar track source nodes and discourse nodes
 
 ## License
 
