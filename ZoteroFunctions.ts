@@ -790,6 +790,7 @@ export type AttachmentLookupHint = {
     citekey?: string;
     doi?: string;
     title?: string;
+    zoteroDataDir?: string;
 };
 
 const ENABLE_LOCAL_API_ANNOTATION_LOOKUP = true;
@@ -812,10 +813,66 @@ function normalizeLocalApiAnnotation(entry: Record<string, unknown>): Attachment
         key,
         parentItem,
     };
-    if (typeof data.annotationImagePath === 'string' && data.annotationImagePath.length > 0) {
-        annotation.annotationImagePath = data.annotationImagePath;
+    const links = (entry.links ?? {}) as Record<string, unknown>;
+    const enclosure = (links.enclosure ?? {}) as Record<string, unknown>;
+    const imageCandidates = [
+        typeof data.annotationImagePath === 'string' ? data.annotationImagePath : '',
+        typeof data.annotationImageURL === 'string' ? data.annotationImageURL : '',
+        typeof data.image === 'string' ? data.image : '',
+        typeof data.imagePath === 'string' ? data.imagePath : '',
+        typeof data.imageAnnotationPath === 'string' ? data.imageAnnotationPath : '',
+        typeof data.cacheImagePath === 'string' ? data.cacheImagePath : '',
+        typeof enclosure.href === 'string' ? enclosure.href : '',
+    ].map((value) => value.trim()).filter((value) => value.length > 0);
+    if (imageCandidates.length > 0) {
+        annotation.annotationImagePath = imageCandidates[0];
     }
     return annotation;
+}
+
+function filePathFromHref(href: string): string | null {
+    const value = href.trim();
+    if (!value) return null;
+    if (value.startsWith('file://')) {
+        try {
+            return decodeURIComponent(new URL(value).pathname);
+        } catch (_err) {
+            return decodeURIComponent(value.replace(/^file:\/\//i, ''));
+        }
+    }
+    if (value.startsWith('/')) {
+        return value;
+    }
+    return null;
+}
+
+function inferZoteroDataDirFromAttachmentPath(attachmentPath: string): string | null {
+    const normalized = attachmentPath.replace(/\\/g, '/');
+    const marker = '/storage/';
+    const index = normalized.lastIndexOf(marker);
+    if (index <= 0) return null;
+    return normalized.slice(0, index);
+}
+
+function normalizeZoteroDataDir(value?: string): string | null {
+    const raw = typeof value === 'string' ? value.trim() : '';
+    if (!raw) return null;
+    return raw.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function applyImageAnnotationCacheFallback(
+    annotation: AttachmentAnnotation,
+    dataDir: string | null,
+    routeHint: { kind: 'users' | 'groups'; ownerId: string; itemKey: string } | null
+) {
+    if ((annotation.annotationType || '').trim().toLowerCase() !== 'image') return;
+    if (annotation.annotationImagePath && annotation.annotationImagePath.trim().length > 0) return;
+    if (!dataDir) return;
+    const normalizedDataDir = dataDir.replace(/\\/g, '/').replace(/\/+$/, '');
+    const cacheBase = routeHint?.kind === 'groups' && routeHint.ownerId
+        ? `${normalizedDataDir}/cache/groups/${routeHint.ownerId}`
+        : `${normalizedDataDir}/cache/library`;
+    annotation.annotationImagePath = `${cacheBase}/${annotation.key}.png`;
 }
 
 function routeFromUri(uri: string): { kind: 'users' | 'groups'; ownerId: string; itemKey: string } | null {
@@ -1208,6 +1265,72 @@ async function getChildrenViaLocalApiCandidates(
     throw (lastError ?? Error('No local API candidate path succeeded.'));
 }
 
+async function getAnnotationChildrenViaLocalApiCandidates(
+    matched: JsonObject | null,
+    libraryId: string | null | undefined,
+    itemKey: string,
+    routeHint: { kind: 'users' | 'groups'; ownerId: string; itemKey: string } | null = null
+): Promise<AttachmentAnnotation[]> {
+    const route = routeHint ?? (matched ? parseWebItemRoute(matched) : null);
+    const candidates: string[] = [];
+    const addPath = (base: string) => {
+        if (base.includes('?')) {
+            candidates.push(`${base}&itemType=annotation`);
+            candidates.push(`${base}&itemType=annotation&include=data`);
+            return;
+        }
+        candidates.push(`${base}?format=json&itemType=annotation`);
+        candidates.push(`${base}?format=json&itemType=annotation&include=data`);
+        candidates.push(`${base}?itemType=annotation`);
+    };
+    if (route) {
+        addPath(`/api/${route.kind}/${route.ownerId}/items/${route.itemKey}/children`);
+        if (route.kind === 'users') {
+            addPath(`/api/users/${route.ownerId}/items/${route.itemKey}/children`);
+        }
+    }
+    addPath(`/api/users/0/items/${itemKey}/children`);
+    addPath(`/api/users/local/items/${itemKey}/children`);
+    if (libraryId && libraryId !== '1') {
+        addPath(`/api/groups/${libraryId}/items/${itemKey}/children`);
+    }
+    addPath(`/api/library/items/${itemKey}/children`);
+
+    const seen = new Set<string>();
+    let lastError: unknown = null;
+    for (const path of candidates) {
+        if (seen.has(path)) continue;
+        seen.add(path);
+        try {
+            const payload = await requestLocalApiJson(path);
+            const annotations = payload
+                .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
+                .map((entry) => normalizeLocalApiAnnotation(entry))
+                .filter((entry): entry is AttachmentAnnotation => !!entry);
+            if (annotations.length > 0) {
+                return annotations;
+            }
+        } catch (err) {
+            lastError = err;
+        }
+    }
+
+    try {
+        const genericPayload = await getChildrenViaLocalApiCandidates(matched, libraryId, itemKey, routeHint);
+        return genericPayload
+            .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
+            .map((entry) => normalizeLocalApiAnnotation(entry))
+            .filter((entry): entry is AttachmentAnnotation => !!entry);
+    } catch (err) {
+        lastError = lastError ?? err;
+    }
+
+    if (lastError instanceof Error && lastError.message.includes('status 404')) {
+        return [];
+    }
+    return [];
+}
+
 function routeWithItemKey(
     route: { kind: 'users' | 'groups'; ownerId: string; itemKey: string } | null,
     itemKey: string
@@ -1239,21 +1362,12 @@ async function collectAttachmentAnnotationsViaLocalApi(
 
     for (const attachment of attachments) {
         const attachmentRoute = routeWithItemKey(routeHint, attachment.key);
-        let attachmentChildren: unknown[] = [];
         try {
-            attachmentChildren = await getChildrenViaLocalApiCandidates(null, libraryIdHint, attachment.key, attachmentRoute);
+            const annotations = await getAnnotationChildrenViaLocalApiCandidates(null, libraryIdHint, attachment.key, attachmentRoute);
+            if (annotations.length === 0) continue;
+            annotationsByParent.set(attachment.key, annotations);
         } catch (_err) {
             continue;
-        }
-
-        for (const child of attachmentChildren) {
-            if (!child || typeof child !== 'object') continue;
-            const entry = child as Record<string, unknown>;
-            const ann = normalizeLocalApiAnnotation(entry);
-            if (!ann) continue;
-            const grouped = annotationsByParent.get(ann.parentItem) || [];
-            grouped.push(ann);
-            annotationsByParent.set(ann.parentItem, grouped);
         }
     }
 
@@ -1316,7 +1430,7 @@ async function attachmentsViaLocalApi(citeKey: string, located: LocationResult |
 
     const children = await getChildrenViaLocalApiCandidates(matched, resolvedLibraryId, itemKey, hintedRoute);
 
-    const attachments: { key: string; linkMode: string; contentType: string; filename: string; title: string }[] = [];
+    const attachments: { key: string; linkMode: string; contentType: string; filename: string; title: string; filePath: string | null }[] = [];
     const topLevelAnnotationsByParent = new Map<string, AttachmentAnnotation[]>();
 
     for (const child of children) {
@@ -1332,7 +1446,10 @@ async function attachmentsViaLocalApi(citeKey: string, located: LocationResult |
             const contentType = typeof data.contentType === 'string' ? data.contentType : '';
             const filename = typeof data.filename === 'string' ? data.filename : '';
             const title = typeof data.title === 'string' ? data.title : '';
-            attachments.push({ key, linkMode, contentType, filename, title });
+            const links = (entry.links ?? {}) as Record<string, unknown>;
+            const enclosure = (links.enclosure ?? {}) as Record<string, unknown>;
+            const filePath = typeof enclosure.href === 'string' ? filePathFromHref(enclosure.href) : null;
+            attachments.push({ key, linkMode, contentType, filename, title, filePath });
             continue;
         }
 
@@ -1350,9 +1467,41 @@ async function attachmentsViaLocalApi(citeKey: string, located: LocationResult |
         ? await collectAttachmentAnnotationsViaLocalApi(attachments, libraryIdHint, hintedRoute)
         : new Map<string, AttachmentAnnotation[]>();
     if (ENABLE_LOCAL_API_ANNOTATION_LOOKUP) {
+        const directItemAnnotations = await getAnnotationChildrenViaLocalApiCandidates(matched, libraryIdHint, itemKey, hintedRoute);
+        if (directItemAnnotations.length > 0) {
+            const current = annotationsByParent.get(itemKey) || [];
+            const seen = new Set(current.map((ann) => ann.key));
+            for (const ann of directItemAnnotations) {
+                if (seen.has(ann.key)) continue;
+                current.push(ann);
+            }
+            annotationsByParent.set(itemKey, current);
+        }
         for (const [parent, anns] of topLevelAnnotationsByParent.entries()) {
             const current = annotationsByParent.get(parent) || [];
-            annotationsByParent.set(parent, [...current, ...anns]);
+            const seen = new Set(current.map((ann) => ann.key));
+            for (const ann of anns) {
+                if (seen.has(ann.key)) continue;
+                current.push(ann);
+            }
+            annotationsByParent.set(parent, current);
+        }
+    }
+    const inferredZoteroDataDir = attachments
+        .map((attachment) => attachment.filePath)
+        .filter((value): value is string => typeof value === 'string' && value.length > 0)
+        .map((filePath) => inferZoteroDataDirFromAttachmentPath(filePath))
+        .find((value): value is string => typeof value === 'string' && value.length > 0) || null;
+    const zoteroDataDir = normalizeZoteroDataDir(hint?.zoteroDataDir) || inferredZoteroDataDir;
+    const itemLevelAnnotations = topLevelAnnotationsByParent.get(itemKey) || [];
+    if (ENABLE_LOCAL_API_ANNOTATION_LOOKUP && zoteroDataDir) {
+        for (const anns of annotationsByParent.values()) {
+            for (const annotation of anns) {
+                applyImageAnnotationCacheFallback(annotation, zoteroDataDir, hintedRoute);
+            }
+        }
+        for (const annotation of itemLevelAnnotations) {
+            applyImageAnnotationCacheFallback(annotation, zoteroDataDir, hintedRoute);
         }
     }
 
@@ -1367,7 +1516,6 @@ async function attachmentsViaLocalApi(citeKey: string, located: LocationResult |
     }
 
     const ordered = [...attachments].sort((a, b) => Number(isPdfAttachment(b)) - Number(isPdfAttachment(a)));
-    const itemLevelAnnotations = topLevelAnnotationsByParent.get(itemKey) || [];
     const attachmentRows = ordered.map((attachment) => {
         const openUri = isPdfAttachment(attachment)
             ? zoteroOpenPdfUri(libraryIdHint ?? '1', attachment.key)

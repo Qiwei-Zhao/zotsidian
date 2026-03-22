@@ -1,4 +1,4 @@
-import { App, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
+import { App, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
 
 import { CitationSuggest } from "CitationSuggest";
 import { ReferencesView, ReferencesViewType } from 'ReferencesView';
@@ -7,7 +7,7 @@ import { FrontMatterScopeProperty } from 'FrontMatter';
 import { createCitationHoverCardElement, createCitationHoverExtension } from 'EditorExtensions';
 import { attachments, exportCollectionPath, normalizeExportItems, libraryCitekeysTitles, locateCollection, localApiLibraryIndex, resolveCitekeysToItems, resolveCitekeysToItemsViaLocalApi, type AttachmentLookupHint } from 'ZoteroFunctions';
 import { fetchSourceRelatedPapers, normalizeDoi, type SemanticRelatedPaper, type RelatedPapersProvider } from 'SemanticScholar';
-import { citationsInText } from 'ReferenceProcessing';
+import { citationsInText, extractCitationMentions } from 'ReferenceProcessing';
 
 export interface CitationIndexEntry {
 	id: string;
@@ -34,11 +34,15 @@ interface ZotsidianSettings {
 	sourceNotesFolderPath: string;
 	sourceTemplatePath: string;
 	enableSidebarAttachments: boolean;
+	zoteroDataDir: string;
 	showSourceRelatedPapers: boolean;
 	relatedPapersProvider: RelatedPapersProvider;
 	citationInsertFormat: CitationInsertFormat;
 	showCitationHoverCard: boolean;
 	citationHoverOpenAction: CitationHoverOpenAction;
+	enableDiscourseGraphsCompatibility: boolean;
+	discourseGraphVisibleNodeTypeIds: string[];
+	enableDiscourseDebugLogging: boolean;
 	showJsonFallbackSettingInAdvanced: boolean;
 }
 
@@ -50,6 +54,135 @@ type PersistedCitationIndexCache = {
 
 type InternalPluginState = {
 	citationIndexCacheByScope: Record<string, PersistedCitationIndexCache>;
+};
+
+type DiscourseCanvasNodeEntry = {
+	shapeId: string;
+	pageId: string;
+	x: number;
+	y: number;
+	w: number;
+	h: number;
+	title: string;
+	src: string;
+	nodeTypeId: string | null;
+	citekey: string | null;
+};
+
+export type DiscourseNodeTypeInfo = {
+	id: string;
+	name: string;
+	format: string;
+	color: string;
+};
+
+export type DiscourseNodeLocateTarget = {
+	id: string;
+	kind: 'markdown-node-link' | 'canvas-discourse-node' | 'base-node-link';
+	nodeId: string;
+	title: string;
+	filePath: string | null;
+	nodeTypeId: string | null;
+	nodeTypeName: string;
+	order: number;
+	label: string;
+	line?: number;
+	from?: { line: number; ch: number };
+	to?: { line: number; ch: number };
+	shapeId?: string;
+	pageId?: string;
+	domId?: string;
+};
+
+export type DiscourseNodeSidebarItem = {
+	id: string;
+	title: string;
+	filePath: string | null;
+	nodeTypeId: string | null;
+	nodeTypeName: string;
+	nodeTypeColor: string;
+	targets: DiscourseNodeLocateTarget[];
+};
+
+type DiscourseCanvasTextEntry = {
+	shapeId: string;
+	pageId: string;
+	x: number;
+	y: number;
+	w: number;
+	h: number;
+	text: string;
+	citekeys: string[];
+	primaryCitekey: string | null;
+};
+
+type DiscourseCanvasCameraEntry = {
+	pageId: string;
+	x: number;
+	y: number;
+	z: number;
+};
+
+type NativeCanvasNodeEntry = {
+	id: string;
+	type: string;
+	text: string;
+	filePath: string | null;
+};
+
+type DiscourseCanvasModel = {
+	mtime: number;
+	nodes: Map<string, DiscourseCanvasNodeEntry>;
+	textShapes: DiscourseCanvasTextEntry[];
+	pageCitekeys: Map<string, string[]>;
+	cameras: Map<string, DiscourseCanvasCameraEntry>;
+	pageNames: Map<string, string>;
+	currentPageId: string | null;
+};
+
+type CachedDiscourseCanvasNodeMap = DiscourseCanvasModel;
+
+type SidebarSelectedContextKind = 'node' | 'text' | 'multi';
+
+type SidebarSelectedContext = {
+	filePath: string;
+	kind: SidebarSelectedContextKind;
+	citekeys: string[];
+	source: 'canvas-selection' | 'canvas-source-node' | 'editor-line' | 'base-selection';
+};
+
+type SidebarFocusedDiscourseNodes = {
+	filePath: string;
+	nodeIds: string[];
+	source: 'canvas-selection' | 'editor-line' | 'base-selection';
+};
+
+type BaseSelectionAnchor = {
+	citekeys: string[];
+	nodeIds: string[];
+	at: number;
+};
+
+export type ReferenceLocateTarget = {
+	id: string;
+	kind: 'markdown' | 'canvas-node' | 'canvas-text' | 'base-dom';
+	citekey: string;
+	order: number;
+	label: string;
+	notePath?: string;
+	line?: number;
+	from?: { line: number; ch: number };
+	to?: { line: number; ch: number };
+	shapeId?: string;
+	pageId?: string;
+	allCitekeys?: string[];
+	domId?: string;
+	domKind?: 'canvas-node' | 'base-cell';
+};
+
+export type ReferenceOccurrenceSummary = {
+	count: number;
+	kind: 'markdown' | 'canvas' | 'mixed' | null;
 };
 
 type ZotsidianStoredData = Partial<ZotsidianSettings> & {
@@ -69,11 +202,15 @@ const DEFAULT_SETTINGS: ZotsidianSettings = {
 	sourceNotesFolderPath: 'source',
 	sourceTemplatePath: '',
 	enableSidebarAttachments: true,
+	zoteroDataDir: '',
 	showSourceRelatedPapers: true,
 	relatedPapersProvider: 'auto',
 	citationInsertFormat: 'pandoc',
 	showCitationHoverCard: true,
 	citationHoverOpenAction: 'pdf-first',
+	enableDiscourseGraphsCompatibility: true,
+	discourseGraphVisibleNodeTypeIds: [],
+	enableDiscourseDebugLogging: false,
 	showJsonFallbackSettingInAdvanced: true,
 };
 
@@ -256,6 +393,19 @@ class ZotsidianSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
+			.setName('Zotero data directory')
+			.setDesc('Optional absolute path to your Zotero data directory. Used to reconstruct image annotation previews when Zotero does not return a preview path directly.')
+			.addText((text) => {
+				text
+					.setPlaceholder('Optional')
+					.setValue(this.plugin.settings.zoteroDataDir)
+					.onChange(async (value) => {
+						this.plugin.settings.zoteroDataDir = value?.trim() || '';
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
 			.setName('Show citation hover card')
 			.setDesc('Hover a citation mention in the editor to preview metadata and open PDF, Zotero, or the source page.')
 			.addToggle((toggle) => {
@@ -263,6 +413,42 @@ class ZotsidianSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.showCitationHoverCard)
 					.onChange(async (value) => {
 						this.plugin.settings.showCitationHoverCard = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Discourse Graphs compatibility mode')
+			.setDesc('Enable gray discourse-node support by mapping clicked node shapes from the discourse canvas file. Plain-text citekey hover remains enabled.')
+			.addToggle((toggle) => {
+				toggle
+					.setValue(this.plugin.settings.enableDiscourseGraphsCompatibility)
+					.onChange(async (value) => {
+						this.plugin.settings.enableDiscourseGraphsCompatibility = value;
+						await this.plugin.saveSettings();
+						await this.plugin.renderSidebarView();
+						this.display();
+					});
+			});
+
+		if (this.plugin.settings.enableDiscourseGraphsCompatibility) {
+			containerEl.createEl('h3', { text: 'Discourse Graph' });
+			const nodeTypeContainer = containerEl.createDiv();
+			nodeTypeContainer.createDiv({
+				text: 'Loading discourse node types...',
+				cls: 'setting-item-description',
+			});
+			void this.renderDiscourseNodeTypeSettings(nodeTypeContainer);
+		}
+
+		new Setting(containerEl)
+			.setName('Discourse canvas debug logging')
+			.setDesc('Log discourse-canvas page detection and click/selection resolution to the developer console. Keep this off unless we are debugging compatibility issues.')
+			.addToggle((toggle) => {
+				toggle
+					.setValue(this.plugin.settings.enableDiscourseDebugLogging)
+					.onChange(async (value) => {
+						this.plugin.settings.enableDiscourseDebugLogging = value;
 						await this.plugin.saveSettings();
 					});
 			});
@@ -324,6 +510,64 @@ class ZotsidianSettingTab extends PluginSettingTab {
 						});
 				});
 		}
+	}
+
+	private async renderDiscourseNodeTypeSettings(containerEl: HTMLElement): Promise<void> {
+		containerEl.empty();
+		await this.plugin.loadDiscourseConfigIfNeeded();
+		const nodeTypes = this.plugin.getDiscourseNodeTypes();
+		if (nodeTypes.length === 0) {
+			containerEl.createDiv({
+				text: 'No discourse node types were found in this vault.',
+				cls: 'setting-item-description',
+			});
+			return;
+		}
+
+		containerEl.createDiv({
+			text: 'Choose which discourse node types appear in the sidebar panel. If none are selected, all node types are shown.',
+			cls: 'setting-item-description',
+		});
+
+		const selectedIds = new Set(this.plugin.settings.discourseGraphVisibleNodeTypeIds || []);
+		for (const nodeType of nodeTypes) {
+			new Setting(containerEl)
+				.setName(`Show ${nodeType.name}`)
+				.setDesc(nodeType.format || nodeType.id)
+				.addToggle((toggle) => {
+					toggle
+						.setValue(selectedIds.size === 0 || selectedIds.has(nodeType.id))
+						.onChange(async (value) => {
+							const rawSelected = this.plugin.settings.discourseGraphVisibleNodeTypeIds || [];
+							const nextSelected = rawSelected.length === 0
+								? new Set(nodeTypes.map((entry) => entry.id))
+								: new Set(rawSelected);
+							if (value) {
+								nextSelected.add(nodeType.id);
+							} else {
+								nextSelected.delete(nodeType.id);
+							}
+							this.plugin.settings.discourseGraphVisibleNodeTypeIds = nextSelected.size === nodeTypes.length
+								? []
+								: Array.from(nextSelected);
+							await this.plugin.saveSettings();
+							await this.plugin.renderSidebarView();
+						});
+				});
+		}
+
+		new Setting(containerEl)
+			.setName('Reset node type filter')
+			.setDesc('Clear the node type filter and show every discourse node type in the sidebar.')
+			.addButton((button) => {
+				button.setButtonText('Show all');
+				button.onClick(async () => {
+					this.plugin.settings.discourseGraphVisibleNodeTypeIds = [];
+					await this.plugin.saveSettings();
+					await this.plugin.renderSidebarView();
+					this.display();
+				});
+			});
 	}
 }
 
@@ -407,16 +651,34 @@ export default class ZotsidianPlugin extends Plugin {
 	private _discourseConfigLoaded: boolean = false;
 	private _discourseSourceNodeTypeId: string | null = null;
 	private _discourseNodesFolderPath: string = 'discourse_graph_nodes';
+	private _discourseNodeTypes: DiscourseNodeTypeInfo[] = [];
 	private _relatedDataCache: Map<string, Promise<SourceRelatedData | null>> = new Map();
 	private _hoverDataCache: Map<string, Promise<CitationHoverData | null>> = new Map();
 	private _baseViewObserver: MutationObserver | null = null;
+	private _baseViewRootCleanup: (() => void) | null = null;
 	private _baseViewRefreshTimer: number | null = null;
 	private _baseHoverCardEl: HTMLElement | null = null;
 	private _baseHoverTargetEl: HTMLElement | null = null;
+	private _baseHoverRootEl: HTMLElement | null = null;
 	private _baseHoverHideTimer: number | null = null;
 	private _baseHoverSwitchTimer: number | null = null;
+	private _suppressBaseHoverUntil: number = 0;
+	private _discourseFocusResolveToken: number = 0;
+	private _discourseSelectionSyncTimer: number | null = null;
+	private _discourseStatePollTimer: number | null = null;
+	private _discourseLocateSuppressUntil: number = 0;
+	private _lastDiscourseSelectionSyncStateKey: string | null = null;
+	private _lastCanvasClickContext: { filePath: string; x: number; y: number; at: number; candidate?: string | null } | null = null;
+	private _lastDiscourseInteraction: { filePath: string; type: string; x: number; y: number; at: number } | null = null;
 	private _persistDataTimer: number | null = null;
 	private _internalState: InternalPluginState = { citationIndexCacheByScope: {} };
+	private _sidebarSelectedContext: SidebarSelectedContext | null = null;
+	private _sidebarFocusedDiscourseNodes: SidebarFocusedDiscourseNodes | null = null;
+	private _discourseCanvasNodesByFile: Map<string, CachedDiscourseCanvasNodeMap> = new Map();
+	private _lastMarkdownLineSelection: { filePath: string; line: number; citekeys: string[] } | null = null;
+	private _referenceLocateCycleByKey: Map<string, number> = new Map();
+	private _markdownLocateFlashTimer: number | null = null;
+	private _baseSelectionAnchorByFile: Map<string, BaseSelectionAnchor> = new Map();
 
 	get activeFilePath() {
 		return this._activeFilePath;
@@ -429,8 +691,135 @@ export default class ZotsidianPlugin extends Plugin {
 		new SearchPanelModal(this.app, this, resolved, this.settings.searchPanelMaxResults || 80).open();
 	}
 
+	async renderSidebarView() {
+		await this.view?.renderReferences();
+	}
+
+	async refreshSidebarView() {
+		await this.view?.refreshReferences();
+		await this.renderSidebarView();
+	}
+
+	private normalizeSidebarSelectedCitekeys(citekeys: string[]): string[] {
+		const normalized: string[] = [];
+		const seen = new Set<string>();
+		for (const raw of citekeys) {
+			const clean = (raw || '').replace(/^@+/, '').trim();
+			if (!clean) continue;
+			const canonical = this.canonicalCitekey(clean);
+			if (!canonical || seen.has(canonical)) continue;
+			seen.add(canonical);
+			normalized.push(clean);
+		}
+		return normalized;
+	}
+
+	private sameSidebarSelectedContext(a: SidebarSelectedContext | null, b: SidebarSelectedContext | null): boolean {
+		if (a === b) return true;
+		if (!a || !b) return false;
+		if (a.filePath !== b.filePath || a.kind !== b.kind || a.source !== b.source) return false;
+		if (a.citekeys.length !== b.citekeys.length) return false;
+		return a.citekeys.every((citekey, index) => this.canonicalCitekey(citekey) === this.canonicalCitekey(b.citekeys[index] || ''));
+	}
+
+	getSidebarSelectedContext(filePath?: string): SidebarSelectedContext | null {
+		if (!this._sidebarSelectedContext) return null;
+		if (filePath && this._sidebarSelectedContext.filePath !== filePath) return null;
+		return {
+			...this._sidebarSelectedContext,
+			citekeys: [...this._sidebarSelectedContext.citekeys],
+		};
+	}
+
+	getSidebarFocusedCitekey(filePath?: string): string | null {
+		return this.getSidebarSelectedContext(filePath)?.citekeys[0] || null;
+	}
+
+	private sameSidebarFocusedDiscourseNodes(a: SidebarFocusedDiscourseNodes | null, b: SidebarFocusedDiscourseNodes | null): boolean {
+		if (a === b) return true;
+		if (!a || !b) return false;
+		if (a.filePath !== b.filePath || a.source !== b.source) return false;
+		if (a.nodeIds.length !== b.nodeIds.length) return false;
+		return a.nodeIds.every((nodeId, index) => nodeId === (b.nodeIds[index] || ''));
+	}
+
+	getSidebarFocusedDiscourseNodes(filePath?: string): string[] {
+		if (!this._sidebarFocusedDiscourseNodes) return [];
+		if (filePath && this._sidebarFocusedDiscourseNodes.filePath !== filePath) return [];
+		return [...this._sidebarFocusedDiscourseNodes.nodeIds];
+	}
+
+	async setSidebarSelectedContext(
+		context: Omit<SidebarSelectedContext, 'filePath' | 'citekeys'> & { citekeys: string[] },
+		filePath: string
+	) {
+		if (!filePath) return;
+		const citekeys = this.normalizeSidebarSelectedCitekeys(context.citekeys);
+		if (citekeys.length === 0) {
+			await this.clearSidebarSelectedContext(filePath);
+			return;
+		}
+		const next: SidebarSelectedContext = {
+			filePath,
+			kind: citekeys.length > 1 ? 'multi' : context.kind,
+			citekeys,
+			source: context.source,
+		};
+		if (this.sameSidebarSelectedContext(this._sidebarSelectedContext, next)) return;
+		this._sidebarSelectedContext = next;
+		await this.renderSidebarView();
+	}
+
+	async setSidebarFocusedCitekey(citekey: string, filePath: string) {
+		await this.setSidebarSelectedContext(
+			{
+				kind: 'node',
+				citekeys: [citekey],
+				source: 'canvas-source-node',
+			},
+			filePath
+		);
+	}
+
+	async clearSidebarSelectedContext(filePath?: string) {
+		if (!this._sidebarSelectedContext) return;
+		if (filePath && this._sidebarSelectedContext.filePath !== filePath) return;
+		this._sidebarSelectedContext = null;
+		await this.renderSidebarView();
+	}
+
+	async clearSidebarFocusedCitekey(filePath?: string) {
+		await this.clearSidebarSelectedContext(filePath);
+	}
+
+	async setSidebarFocusedDiscourseNodes(nodeIds: string[], filePath: string, source: SidebarFocusedDiscourseNodes['source']) {
+		if (!filePath) return;
+		const normalized = Array.from(new Set(nodeIds.map((nodeId) => nodeId.trim()).filter(Boolean)));
+		if (normalized.length === 0) {
+			await this.clearSidebarFocusedDiscourseNodes(filePath);
+			return;
+		}
+		const next: SidebarFocusedDiscourseNodes = {
+			filePath,
+			nodeIds: normalized,
+			source,
+		};
+		if (this.sameSidebarFocusedDiscourseNodes(this._sidebarFocusedDiscourseNodes, next)) return;
+		this._sidebarFocusedDiscourseNodes = next;
+		await this.view?.renderReferences();
+	}
+
+	async clearSidebarFocusedDiscourseNodes(filePath?: string) {
+		if (!this._sidebarFocusedDiscourseNodes) return;
+		if (filePath && this._sidebarFocusedDiscourseNodes.filePath !== filePath) return;
+		this._sidebarFocusedDiscourseNodes = null;
+		await this.view?.renderReferences();
+	}
+
 	async setActiveFilePath(path: string) {
 		if (path !== this._activeFilePath) {
+			this._sidebarSelectedContext = null;
+			this._lastMarkdownLineSelection = null;
 			this._activeFilePath = path;
 
 			if (!path) {
@@ -444,7 +833,7 @@ export default class ZotsidianPlugin extends Plugin {
 			this.ensureCitationIndex(scope, false).catch(() => {
 				/* noop */
 			});
-			await this.view?.renderReferences();
+			await this.refreshSidebarView();
 		}
 	}
 
@@ -460,6 +849,78 @@ export default class ZotsidianPlugin extends Plugin {
 		const active = this.app.workspace.getActiveFile();
 		const cache = active ? this.app.metadataCache.getFileCache(active) : null;
 		return this.resolveScopeFromFrontmatter(cache?.frontmatter as Record<string, unknown> | undefined);
+	}
+
+	private discourseDebug(...args: unknown[]) {
+		if (!this.settings.enableDiscourseDebugLogging) return;
+		console.warn('[Zotsidian:discourse]', ...args);
+	}
+
+	private discourseSelectionSyncDebugOnce(kind: string, payload: Record<string, unknown>) {
+		if (!this.settings.enableDiscourseDebugLogging) return;
+		const key = `${kind}:${JSON.stringify(payload)}`;
+		if (this._lastDiscourseSelectionSyncStateKey === key) return;
+		this._lastDiscourseSelectionSyncStateKey = key;
+		this.discourseDebug(kind, payload);
+	}
+
+	private summarizeDiscourseTarget(target: HTMLElement | null): Record<string, unknown> | null {
+		if (!(target instanceof HTMLElement)) return null;
+		const text = (target.innerText || target.textContent || '').replace(/\s+/g, ' ').trim();
+		return {
+			tag: target.tagName.toLowerCase(),
+			className: target.className || '',
+			dataShapeId: target.getAttribute('data-shape-id') || target.closest<HTMLElement>('[data-shape-id]')?.getAttribute('data-shape-id') || '',
+			text: text.length > 120 ? `${text.slice(0, 117)}...` : text,
+		};
+	}
+
+	private summarizeCitekeys(citekeys: string[]): string[] {
+		const clean = citekeys.filter(Boolean);
+		if (clean.length <= 12) return clean;
+		return [...clean.slice(0, 12), `... (+${clean.length - 12} more)`];
+	}
+
+	private async dumpActiveDiscourseCanvasDebugSnapshot() {
+		const leaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
+		if (!this.isDiscourseCanvasLeaf(leaf)) {
+			new Notice('Active leaf is not a discourse canvas.');
+			return;
+		}
+		const file = this.getLeafFile(leaf) ?? this.app.workspace.getActiveFile();
+		const root = this.getBaseViewRoot(leaf);
+		if (!(file instanceof TFile) || !(root instanceof HTMLElement)) {
+			new Notice('Could not resolve the active discourse canvas root.');
+			return;
+		}
+		const model = await this.getDiscourseCanvasModel(file);
+		const pageId = this.getDiscourseCanvasActivePageId(root, model);
+		const pageCitekeys = pageId ? (model.pageCitekeys.get(pageId) || []) : [];
+		const selectedCandidates = this.getSelectedDiscourseSourceNodeCandidates(root).map((candidate) => candidate.citekey);
+		const visibleTextFallback = citationsInText(root.innerText || root.textContent || '');
+		const storeCurrentPageId = this.getDiscourseStoreCurrentPageId(leaf);
+		const storeSelectedShapeIds = this.getDiscourseStoreSelectedShapeIds(leaf);
+		const storeHoveredShapeId = this.getDiscourseStoreHoveredShapeId(leaf);
+		const snapshot = {
+			filePath: file.path,
+			pageId,
+			currentPageId: model.currentPageId,
+			storeCurrentPageId,
+			storeSelectedShapeIds,
+			storeHoveredShapeId,
+			pageName: pageId ? (model.pageNames.get(pageId) || '') : '',
+			pageCitekeys,
+			nodesOnPage: pageId ? Array.from(model.nodes.values()).filter((node) => node.pageId === pageId).map((node) => node.citekey || node.title) : [],
+			textShapesOnPage: pageId ? model.textShapes.filter((entry) => entry.pageId === pageId).map((entry) => ({ citekeys: entry.citekeys, text: entry.text.slice(0, 120) })) : [],
+			selectedCandidates,
+			sidebarFocused: this.getSidebarFocusedCitekey(file.path),
+			sidebarSelectedContext: this.getSidebarSelectedContext(file.path),
+			lastCanvasClickContext: this._lastCanvasClickContext,
+			visibleTextFallback,
+			root: this.summarizeDiscourseTarget(root),
+		};
+		console.warn('[Zotsidian:discourse] debug-snapshot', snapshot);
+		new Notice('Zotsidian discourse debug snapshot logged to console.');
 	}
 
 	private defaultCitationIndexStatus(scope: string): CitationIndexStatus {
@@ -674,10 +1135,20 @@ export default class ZotsidianPlugin extends Plugin {
 		return view?.file instanceof TFile ? view.file : null;
 	}
 
+	private isDiscourseCanvasLeaf(leaf: WorkspaceLeaf | null): boolean {
+		if (!leaf) return false;
+		const view = leaf.view as { getViewType?: () => string; type?: string; containerEl?: HTMLElement };
+		const type = typeof view?.getViewType === 'function' ? view.getViewType() : (typeof view?.type === 'string' ? view.type : '');
+		if (type === 'tldraw-dg-preview' || type.toLowerCase().includes('tldraw-dg')) return true;
+		const container = view?.containerEl;
+		return container instanceof HTMLElement && !!container.querySelector('.tldraw__editor, .tl-canvas, .tldraw-view-content');
+	}
+
 	private isBaseLeaf(leaf: WorkspaceLeaf | null): boolean {
 		if (!leaf) return false;
 		const file = this.getLeafFile(leaf);
 		if (file?.extension === 'base' || file?.extension === 'canvas') return true;
+		if (this.isDiscourseCanvasLeaf(leaf)) return true;
 		const view = leaf.view as { getViewType?: () => string; type?: string; containerEl?: HTMLElement };
 		const type = typeof view?.getViewType === 'function' ? view.getViewType() : (typeof view?.type === 'string' ? view.type : '');
 		if (type.toLowerCase().includes('base') || type.toLowerCase().includes('canvas')) return true;
@@ -690,10 +1161,11 @@ export default class ZotsidianPlugin extends Plugin {
 
 	private getBaseViewRoot(leaf: WorkspaceLeaf | null): HTMLElement | null {
 		if (!this.isBaseLeaf(leaf)) return null;
-		const view = leaf?.view as { containerEl?: HTMLElement } | undefined;
-		const container = view?.containerEl;
+		const container = this.getBaseViewContainer(leaf);
 		if (!(container instanceof HTMLElement)) return null;
 		return (
+			container.querySelector<HTMLElement>('.tldraw__editor') ||
+			container.querySelector<HTMLElement>('.tl-canvas') ||
 			container.querySelector<HTMLElement>('.canvas-wrapper') ||
 			container.querySelector<HTMLElement>('.view-content') ||
 			container.querySelector<HTMLElement>('.workspace-leaf-content') ||
@@ -701,18 +1173,1142 @@ export default class ZotsidianPlugin extends Plugin {
 		);
 	}
 
+	private getBaseViewContainer(leaf: WorkspaceLeaf | null): HTMLElement | null {
+		if (!this.isBaseLeaf(leaf)) return null;
+		const view = leaf?.view as { containerEl?: HTMLElement } | undefined;
+		const container = view?.containerEl;
+		if (!(container instanceof HTMLElement)) return null;
+		return container;
+	}
+
+	private getBaseLeafAndRootForFile(filePath: string): { leaf: WorkspaceLeaf; file: TFile; root: HTMLElement } | null {
+		if (!filePath) return null;
+		const leaves = new Set<WorkspaceLeaf>();
+		const activeLeaf = this.app.workspace.activeLeaf;
+		const recentLeaf = this.app.workspace.getMostRecentLeaf();
+		if (activeLeaf) leaves.add(activeLeaf);
+		if (recentLeaf) leaves.add(recentLeaf);
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			leaves.add(leaf);
+		});
+		for (const leaf of leaves) {
+			const file = this.getLeafFile(leaf) ?? this.app.workspace.getActiveFile();
+			if (!(file instanceof TFile) || file.path !== filePath || !this.isBaseLeaf(leaf)) continue;
+			const root = this.getBaseViewRoot(leaf);
+			if (!(root instanceof HTMLElement)) continue;
+			return { leaf, file, root };
+		}
+		return null;
+	}
+
+	private isSidebarTarget(target: HTMLElement | null, path?: EventTarget[]): boolean {
+		if (!(target instanceof HTMLElement)) return false;
+		if (target.closest('.zotsidian-container-div')) return true;
+		return !!path?.some((entry) => entry instanceof HTMLElement && entry.classList.contains('zotsidian-container-div'));
+	}
+
+	private sameCitekeyList(a: string[], b: string[]): boolean {
+		if (a.length !== b.length) return false;
+		return a.every((citekey, index) => this.canonicalCitekey(citekey) === this.canonicalCitekey(b[index] || ''));
+	}
+
+	private async syncActiveMarkdownLineContext() {
+		const activeLeaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
+		if (activeLeaf?.view instanceof ReferencesView) return;
+		const view = activeLeaf?.view;
+		if (!(view instanceof MarkdownView)) return;
+		const file = this.getLeafFile(activeLeaf) ?? this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile)) return;
+		if (this.isBaseLeaf(activeLeaf) || this.isDiscourseCanvasLeaf(activeLeaf)) return;
+
+		if (view.getMode() !== 'source') {
+			const existing = this.getSidebarSelectedContext(file.path);
+			if (existing?.source === 'editor-line') {
+				this._lastMarkdownLineSelection = null;
+				await this.clearSidebarSelectedContext(file.path);
+			}
+			if (this._sidebarFocusedDiscourseNodes?.filePath === file.path && this._sidebarFocusedDiscourseNodes.source === 'editor-line') {
+				await this.clearSidebarFocusedDiscourseNodes(file.path);
+			}
+			return;
+		}
+
+		const editor = view.editor;
+		const cursor = editor.getCursor('head');
+		const line = Math.max(0, Math.min(cursor.line, editor.lastLine()));
+		const lineText = editor.getLine(line) || '';
+		const citekeys = this.normalizeSidebarSelectedCitekeys(citationsInText(lineText));
+		const nextSelection = { filePath: file.path, line, citekeys };
+		if (
+			this._lastMarkdownLineSelection &&
+			this._lastMarkdownLineSelection.filePath === nextSelection.filePath &&
+			this._lastMarkdownLineSelection.line === nextSelection.line &&
+			this.sameCitekeyList(this._lastMarkdownLineSelection.citekeys, nextSelection.citekeys)
+		) {
+			const existing = this.getSidebarSelectedContext(file.path);
+			if (existing?.source === 'editor-line' && this.sameCitekeyList(existing.citekeys, citekeys)) {
+				return;
+			}
+		}
+
+		this._lastMarkdownLineSelection = nextSelection;
+		if (citekeys.length === 0) {
+			const existing = this.getSidebarSelectedContext(file.path);
+			if (existing?.source === 'editor-line') {
+				await this.clearSidebarSelectedContext(file.path);
+			}
+		} else {
+			await this.setSidebarSelectedContext(
+				{
+					kind: citekeys.length > 1 ? 'multi' : 'text',
+					citekeys,
+					source: 'editor-line',
+				},
+				file.path
+			);
+		}
+
+		const focusedNodeIds: string[] = [];
+		const mentions = this.extractMarkdownWikiLinkMentions(lineText);
+		for (const mention of mentions) {
+			const startCh = mention.from;
+			const endCh = mention.to;
+			if (cursor.ch < startCh || cursor.ch > endCh) continue;
+			const linkedFile = this.resolveWikiLinkToFile(mention.rawLink, file.path);
+			const nodeTypeId = this.getDiscourseNodeTypeIdForFile(linkedFile);
+			if (!linkedFile || !nodeTypeId || !this.shouldShowDiscourseNodeType(nodeTypeId)) continue;
+			focusedNodeIds.push(linkedFile.path);
+		}
+		if (focusedNodeIds.length > 0) {
+			await this.setSidebarFocusedDiscourseNodes(focusedNodeIds, file.path, 'editor-line');
+		} else if (this._sidebarFocusedDiscourseNodes?.filePath === file.path && this._sidebarFocusedDiscourseNodes.source === 'editor-line') {
+			await this.clearSidebarFocusedDiscourseNodes(file.path);
+		}
+	}
+
+	private getReferenceLocateCycleKey(filePath: string, citekey: string): string {
+		return `${filePath}::${this.canonicalCitekey(citekey)}`;
+	}
+
+	private getLineStarts(text: string): number[] {
+		const starts = [0];
+		for (let index = 0; index < text.length; index++) {
+			if (text[index] === '\n') {
+				starts.push(index + 1);
+			}
+		}
+		return starts;
+	}
+
+	private offsetToEditorPosition(lineStarts: number[], offset: number): { line: number; ch: number } {
+		let low = 0;
+		let high = lineStarts.length - 1;
+		while (low <= high) {
+			const mid = Math.floor((low + high) / 2);
+			const start = lineStarts[mid];
+			const next = mid + 1 < lineStarts.length ? lineStarts[mid + 1] : Number.POSITIVE_INFINITY;
+			if (offset < start) {
+				high = mid - 1;
+				continue;
+			}
+			if (offset >= next) {
+				low = mid + 1;
+				continue;
+			}
+			return { line: mid, ch: offset - start };
+		}
+		const fallbackLine = Math.max(0, Math.min(lineStarts.length - 1, low));
+		return { line: fallbackLine, ch: Math.max(0, offset - (lineStarts[fallbackLine] || 0)) };
+	}
+
+	private async getMarkdownReferenceLocateTargets(file: TFile, citekey: string): Promise<ReferenceLocateTarget[]> {
+		const text = await this.app.vault.cachedRead(file);
+		const canonical = this.canonicalCitekey(citekey);
+		const mentions = extractCitationMentions(text).filter((mention) => this.canonicalCitekey(mention.citekey) === canonical);
+		if (mentions.length === 0) return [];
+		const lineStarts = this.getLineStarts(text);
+		return mentions.map((mention, index) => {
+			const from = this.offsetToEditorPosition(lineStarts, mention.from);
+			const to = this.offsetToEditorPosition(lineStarts, mention.to);
+			return {
+				id: `markdown:${file.path}:${canonical}:${mention.from}:${index}`,
+				kind: 'markdown',
+				citekey,
+				order: index,
+				label: `Line ${from.line + 1}`,
+				line: from.line,
+				from,
+				to,
+			};
+		});
+	}
+
+	private getDiscourseNodeTypeIdForFile(file: TFile | null | undefined): string | null {
+		if (!(file instanceof TFile)) return null;
+		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+		const nodeTypeId = typeof frontmatter?.nodeTypeId === 'string' ? frontmatter.nodeTypeId : '';
+		if (!nodeTypeId || !this.getDiscourseNodeTypeById(nodeTypeId)) return null;
+		return nodeTypeId;
+	}
+
+	private extractMarkdownWikiLinkMentions(text: string): Array<{ rawLink: string; from: number; to: number }> {
+		const mentions: Array<{ rawLink: string; from: number; to: number }> = [];
+		const wikiLinkRe = /\[\[([^\]]+)\]\]/g;
+		let match: RegExpExecArray | null;
+		while ((match = wikiLinkRe.exec(text)) !== null) {
+			const rawLink = (match[1] || '').trim();
+			if (!rawLink) continue;
+			mentions.push({
+				rawLink,
+				from: match.index,
+				to: match.index + match[0].length,
+			});
+		}
+		return mentions;
+	}
+
+	private resolveWikiLinkToFile(rawLink: string, sourcePath: string): TFile | null {
+		const linkPath = (rawLink.split('|')[0] || rawLink).split('#')[0].trim();
+		if (!linkPath) return null;
+		return this.app.metadataCache.getFirstLinkpathDest(linkPath, sourcePath) || null;
+	}
+
+	private extractDiscourseBlockRefId(src: string): string | null {
+		const value = (src || '').trim();
+		if (!value) return null;
+		if (value.startsWith('asset:')) {
+			const raw = value.split(':')[1] || '';
+			return raw.startsWith('blockref:') ? raw.slice('blockref:'.length) : null;
+		}
+		if (value.startsWith('blockref:')) {
+			return value.slice('blockref:'.length);
+		}
+		return null;
+	}
+
+	private async getNativeCanvasNodes(file: TFile): Promise<NativeCanvasNodeEntry[]> {
+		if (file.extension !== 'canvas' || this.isDiscourseCanvasLeaf(this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf())) {
+			return [];
+		}
+		try {
+			const raw = await this.app.vault.cachedRead(file);
+			const parsed = JSON.parse(raw) as { nodes?: Array<Record<string, unknown>> };
+			if (!Array.isArray(parsed?.nodes)) return [];
+			return parsed.nodes.map((node): NativeCanvasNodeEntry | null => {
+				const id = typeof node.id === 'string' ? node.id : '';
+				const type = typeof node.type === 'string' ? node.type : '';
+				if (!id || !type) return null;
+				return {
+					id,
+					type,
+					text: typeof node.text === 'string' ? node.text : '',
+					filePath: typeof node.file === 'string' ? node.file : (typeof node.path === 'string' ? node.path : null),
+				};
+			}).filter((entry): entry is NativeCanvasNodeEntry => !!entry);
+		} catch {
+			return [];
+		}
+	}
+
+	private getBaseSelectionAnchor(filePath: string): BaseSelectionAnchor | null {
+		if (!filePath) return null;
+		const anchor = this._baseSelectionAnchorByFile.get(filePath) || null;
+		if (!anchor) return null;
+		if (Date.now() - anchor.at > 12000) {
+			this._baseSelectionAnchorByFile.delete(filePath);
+			return null;
+		}
+		return anchor;
+	}
+
+	private setBaseSelectionAnchor(filePath: string, citekeys: string[], nodeIds: string[]) {
+		if (!filePath) return;
+		const normalizedCitekeys = this.normalizeSidebarSelectedCitekeys(citekeys);
+		const normalizedNodeIds = Array.from(new Set(nodeIds.filter(Boolean)));
+		if (normalizedCitekeys.length === 0 && normalizedNodeIds.length === 0) {
+			this._baseSelectionAnchorByFile.delete(filePath);
+			return;
+		}
+		this._baseSelectionAnchorByFile.set(filePath, {
+			citekeys: normalizedCitekeys,
+			nodeIds: normalizedNodeIds,
+			at: Date.now(),
+		});
+	}
+
+	private async resolveDiscourseNodeFileFromSrc(canvasFile: TFile, src: string): Promise<TFile | null> {
+		const blockRefId = this.extractDiscourseBlockRefId(src);
+		if (!blockRefId) return null;
+		const canvasFileCache = this.app.metadataCache.getFileCache(canvasFile);
+		const block = canvasFileCache?.blocks?.[blockRefId];
+		if (!block) return null;
+		try {
+			const fileContent = await this.app.vault.cachedRead(canvasFile);
+			const blockContent = fileContent.substring(block.position.start.offset, block.position.end.offset);
+			const match = blockContent.match(/\[\[(.*?)\]\]/);
+			if (!match?.[1]) return null;
+			return this.resolveWikiLinkToFile(match[1].trim(), canvasFile.path);
+		} catch {
+			return null;
+		}
+	}
+
+	private resolveDiscourseNodeFileFromTitle(title: string, sourcePath: string): TFile | null {
+		const cleanTitle = (title || '').trim();
+		if (!cleanTitle) return null;
+		const direct = this.app.metadataCache.getFirstLinkpathDest(cleanTitle, sourcePath);
+		if (direct instanceof TFile) {
+			const nodeTypeId = this.getDiscourseNodeTypeIdForFile(direct);
+			if (nodeTypeId) return direct;
+		}
+		const discourseNotes = this.app.vault.getMarkdownFiles().filter((note) => {
+			const nodeTypeId = this.getDiscourseNodeTypeIdForFile(note);
+			return !!nodeTypeId;
+		});
+		const normalized = cleanTitle.toLowerCase();
+		const exactMatches = discourseNotes.filter((note) => note.basename.trim().toLowerCase() === normalized);
+		return exactMatches.length === 1 ? exactMatches[0] : null;
+	}
+
+	private async getMarkdownDiscourseNodeLocateTargets(file: TFile): Promise<DiscourseNodeLocateTarget[]> {
+		await this.loadDiscourseConfigIfNeeded();
+		const text = await this.app.vault.cachedRead(file);
+		const mentions = this.extractMarkdownWikiLinkMentions(text);
+		if (mentions.length === 0) return [];
+		const lineStarts = this.getLineStarts(text);
+		const targets: DiscourseNodeLocateTarget[] = [];
+		for (let index = 0; index < mentions.length; index += 1) {
+			const mention = mentions[index];
+			const linkedFile = this.resolveWikiLinkToFile(mention.rawLink, file.path);
+			const nodeTypeId = this.getDiscourseNodeTypeIdForFile(linkedFile);
+			if (!linkedFile || !nodeTypeId || !this.shouldShowDiscourseNodeType(nodeTypeId)) continue;
+			const nodeType = this.getDiscourseNodeTypeById(nodeTypeId);
+			const from = this.offsetToEditorPosition(lineStarts, mention.from);
+			const to = this.offsetToEditorPosition(lineStarts, mention.to);
+			targets.push({
+				id: `markdown-node:${file.path}:${linkedFile.path}:${mention.from}:${index}`,
+				kind: 'markdown-node-link',
+				nodeId: linkedFile.path,
+				title: linkedFile.basename,
+				filePath: linkedFile.path,
+				nodeTypeId,
+				nodeTypeName: nodeType?.name || 'Node',
+				order: targets.length,
+				label: `Line ${from.line + 1}`,
+				line: from.line,
+				from,
+				to,
+			});
+		}
+		return targets;
+	}
+
+	private async getCanvasDiscourseNodeLocateTargets(file: TFile): Promise<DiscourseNodeLocateTarget[]> {
+		await this.loadDiscourseConfigIfNeeded();
+		const model = await this.getDiscourseCanvasModel(file);
+		const canvasInfo = this.getDiscourseCanvasLeafAndFileForPath(file.path);
+		const activePageId =
+			canvasInfo?.file.path === file.path
+				? this.getDiscourseStoreCurrentPageId(canvasInfo.leaf) || this.getDiscourseCanvasActivePageId(canvasInfo.root, model)
+				: model.currentPageId;
+		const pageId = activePageId || model.currentPageId || model.pageNames.keys().next().value || null;
+		if (!pageId) return [];
+
+		const pageNodes = Array.from(model.nodes.values())
+			.filter((entry) => entry.pageId === pageId && !!entry.nodeTypeId && this.shouldShowDiscourseNodeType(entry.nodeTypeId))
+			.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+
+		const targets: DiscourseNodeLocateTarget[] = [];
+		for (const entry of pageNodes) {
+			const linkedFile =
+				(entry.src ? await this.resolveDiscourseNodeFileFromSrc(file, entry.src) : null)
+				|| this.resolveDiscourseNodeFileFromTitle(entry.title || '', file.path);
+			const nodeType = this.getDiscourseNodeTypeById(entry.nodeTypeId);
+			const nodeId = linkedFile?.path || `${file.path}::${entry.shapeId}`;
+			targets.push({
+				id: `canvas-node-ref:${file.path}:${entry.shapeId}`,
+				kind: 'canvas-discourse-node',
+				nodeId,
+				title: linkedFile?.basename || entry.title || 'Untitled node',
+				filePath: linkedFile?.path || null,
+				nodeTypeId: entry.nodeTypeId,
+				nodeTypeName: nodeType?.name || 'Node',
+				order: targets.length,
+				label: nodeType?.name || 'Node',
+				shapeId: entry.shapeId,
+				pageId: entry.pageId,
+			});
+		}
+		return targets;
+	}
+
+	private getBaseDiscourseNodeLocateTargets(file: TFile): DiscourseNodeLocateTarget[] {
+		if (file.extension === 'canvas' && !this.isDiscourseCanvasLeaf(this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf())) {
+			return [];
+		}
+		const context = this.getBaseLeafAndRootForFile(file.path);
+		if (!context) return [];
+		const targets: DiscourseNodeLocateTarget[] = [];
+		let ordinal = 0;
+		for (const element of this.getBaseLocateCandidateElements(context.root, file)) {
+			if (this.isIgnoredBaseHoverElement(element)) continue;
+			const nodeId = this.resolveDiscourseNodeIdFromElement(element, file.path);
+			if (!nodeId) continue;
+			const linkedAbstract = this.app.vault.getAbstractFileByPath(nodeId);
+			const linkedFile = linkedAbstract instanceof TFile ? linkedAbstract : null;
+			const nodeTypeId = this.getDiscourseNodeTypeIdForFile(linkedFile);
+			if (!linkedFile || !nodeTypeId || !this.shouldShowDiscourseNodeType(nodeTypeId)) continue;
+			const nodeType = this.getDiscourseNodeTypeById(nodeTypeId);
+			targets.push({
+				id: `base-node-ref:${file.path}:${nodeId}:${ordinal}`,
+				kind: 'base-node-link',
+				nodeId,
+				title: linkedFile.basename,
+				filePath: linkedFile.path,
+				nodeTypeId,
+				nodeTypeName: nodeType?.name || 'Node',
+				order: targets.length,
+				label: file.extension === 'canvas' ? 'Canvas node' : 'Visible cell',
+				domId: element.getAttribute('data-node-id') || undefined,
+			});
+			ordinal += 1;
+		}
+		return targets;
+	}
+
+	private async getBaseDetectedDiscourseNodeLocateTargets(file: TFile): Promise<DiscourseNodeLocateTarget[]> {
+		await this.loadDiscourseConfigIfNeeded();
+		if (file.extension !== 'base') return [];
+		const targets: DiscourseNodeLocateTarget[] = [];
+		for (const note of await this.getBaseCandidateNoteFiles(file)) {
+			const nodeTypeId = this.getDiscourseNodeTypeIdForFile(note);
+			if (!nodeTypeId || !this.shouldShowDiscourseNodeType(nodeTypeId)) continue;
+			const nodeType = this.getDiscourseNodeTypeById(nodeTypeId);
+			targets.push({
+				id: `base-node-file:${file.path}:${note.path}`,
+				kind: 'base-node-link',
+				nodeId: note.path,
+				title: note.basename,
+				filePath: note.path,
+				nodeTypeId,
+				nodeTypeName: nodeType?.name || 'Node',
+				order: targets.length,
+				label: 'Base row',
+			});
+		}
+		return targets;
+	}
+
+	private async getNativeCanvasReferenceLocateTargets(file: TFile, citekey: string): Promise<ReferenceLocateTarget[]> {
+		const canonical = this.canonicalCitekey(citekey);
+		const nodes = await this.getNativeCanvasNodes(file);
+		const targets: ReferenceLocateTarget[] = [];
+		for (const node of nodes) {
+			const text = node.text || (node.filePath ? `[[${node.filePath}]]` : '');
+			const mentions = citationsInText(text).filter((item) => this.canonicalCitekey(item) === canonical);
+			for (let index = 0; index < mentions.length; index += 1) {
+				targets.push({
+					id: `native-canvas:${file.path}:${node.id}:${index}`,
+					kind: 'base-dom',
+					citekey,
+					order: targets.length,
+					label: 'Canvas node',
+					domId: node.id,
+					domKind: 'canvas-node',
+				});
+			}
+			if (node.filePath) {
+				const linked = this.app.vault.getAbstractFileByPath(node.filePath);
+				if (linked instanceof TFile && linked.basename.replace(/^@+/, '') === citekey.replace(/^@+/, '')) {
+					targets.push({
+						id: `native-canvas-file:${file.path}:${node.id}`,
+						kind: 'base-dom',
+						citekey,
+						order: targets.length,
+						label: 'Canvas file node',
+						domId: node.id,
+						domKind: 'canvas-node',
+					});
+				}
+			}
+		}
+		return targets;
+	}
+
+	private async getNativeCanvasDiscourseNodeLocateTargets(file: TFile): Promise<DiscourseNodeLocateTarget[]> {
+		await this.loadDiscourseConfigIfNeeded();
+		const nodes = await this.getNativeCanvasNodes(file);
+		const targets: DiscourseNodeLocateTarget[] = [];
+		for (const node of nodes) {
+			if (node.filePath) {
+				const linked = this.app.vault.getAbstractFileByPath(node.filePath);
+				if (linked instanceof TFile) {
+					const nodeTypeId = this.getDiscourseNodeTypeIdForFile(linked);
+					if (nodeTypeId && this.shouldShowDiscourseNodeType(nodeTypeId)) {
+						const nodeType = this.getDiscourseNodeTypeById(nodeTypeId);
+						targets.push({
+							id: `native-canvas-node-file:${file.path}:${node.id}`,
+							kind: 'base-node-link',
+							nodeId: linked.path,
+							title: linked.basename,
+							filePath: linked.path,
+							nodeTypeId,
+							nodeTypeName: nodeType?.name || 'Node',
+							order: targets.length,
+							label: 'Canvas node',
+							domId: node.id,
+						});
+					}
+				}
+			}
+			for (const mention of this.extractMarkdownWikiLinkMentions(node.text || '')) {
+				const linked = this.resolveWikiLinkToFile(mention.rawLink, file.path);
+				const nodeTypeId = this.getDiscourseNodeTypeIdForFile(linked);
+				if (!linked || !nodeTypeId || !this.shouldShowDiscourseNodeType(nodeTypeId)) continue;
+				const nodeType = this.getDiscourseNodeTypeById(nodeTypeId);
+				targets.push({
+					id: `native-canvas-node-text:${file.path}:${node.id}:${targets.length}`,
+					kind: 'base-node-link',
+					nodeId: linked.path,
+					title: linked.basename,
+					filePath: linked.path,
+					nodeTypeId,
+					nodeTypeName: nodeType?.name || 'Node',
+					order: targets.length,
+					label: 'Canvas node',
+					domId: node.id,
+				});
+			}
+		}
+		return targets;
+	}
+
+	private resolveReferenceFile(fileOrPath: TFile | string | null | undefined): TFile | null {
+		if (fileOrPath instanceof TFile) return fileOrPath;
+		if (typeof fileOrPath !== 'string' || !fileOrPath.trim()) return null;
+		const abstract = this.app.vault.getAbstractFileByPath(fileOrPath.trim());
+		return abstract instanceof TFile ? abstract : null;
+	}
+
+	private async getDiscourseReferenceLocateTargets(file: TFile): Promise<ReferenceLocateTarget[]> {
+		const model = await this.getDiscourseCanvasModel(file);
+		const canvasInfo = this.getDiscourseCanvasLeafAndFileForPath(file.path);
+		const activePageId =
+			canvasInfo?.file.path === file.path
+				? this.getDiscourseStoreCurrentPageId(canvasInfo.leaf) || this.getDiscourseCanvasActivePageId(canvasInfo.root, model)
+				: model.currentPageId;
+		const pageId = activePageId || model.currentPageId || model.pageNames.keys().next().value || null;
+		if (!pageId) return [];
+
+		const targets: ReferenceLocateTarget[] = [];
+		const nodeEntries = Array.from(model.nodes.values())
+			.filter((entry) => entry.pageId === pageId && entry.citekey)
+			.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+		nodeEntries.forEach((entry, index) => {
+			if (!entry.citekey) return;
+			targets.push({
+				id: `canvas-node:${file.path}:${entry.shapeId}`,
+				kind: 'canvas-node',
+				citekey: entry.citekey,
+				order: index,
+				label: 'Node',
+				shapeId: entry.shapeId,
+				pageId,
+				allCitekeys: [entry.citekey],
+			});
+		});
+
+		const textEntries = model.textShapes
+			.filter((entry) => entry.pageId === pageId && entry.citekeys.length > 0)
+			.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+		textEntries.forEach((entry, index) => {
+			for (const citekeyInShape of entry.citekeys) {
+				targets.push({
+					id: `canvas-text:${file.path}:${entry.shapeId}:${this.canonicalCitekey(citekeyInShape)}:${index}`,
+					kind: 'canvas-text',
+					citekey: citekeyInShape,
+					order: targets.length,
+					label: entry.citekeys.length > 1 ? `Text · ${entry.citekeys.length} cites` : 'Text',
+					shapeId: entry.shapeId,
+					pageId,
+					allCitekeys: [...entry.citekeys],
+				});
+			}
+		});
+
+		return targets;
+	}
+
+	async getReferenceLocateTargetsForFile(fileOrPath: TFile | string | null | undefined, citekey: string): Promise<ReferenceLocateTarget[]> {
+		const activeFile = this.resolveReferenceFile(fileOrPath);
+		if (!(activeFile instanceof TFile)) return [];
+		if (activeFile.extension === 'canvas' && !this.isDiscourseCanvasLeaf(this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf())) {
+			return this.getNativeCanvasReferenceLocateTargets(activeFile, citekey);
+		}
+		if (activeFile.extension === 'base') {
+			return this.getBaseFileReferenceLocateTargets(activeFile, citekey);
+		}
+		if (activeFile.extension === 'canvas') {
+			return this.getBaseReferenceLocateTargets(activeFile, citekey);
+		}
+		const canonical = this.canonicalCitekey(citekey);
+		if (activeFile.extension === 'md') {
+			const canvasInfo = this.getDiscourseCanvasLeafAndFileForPath(activeFile.path);
+			if (canvasInfo?.file.path === activeFile.path) {
+				const targets = await this.getDiscourseReferenceLocateTargets(activeFile);
+				return targets.filter((target) => this.canonicalCitekey(target.citekey) === canonical);
+			}
+			const targets = await this.getMarkdownReferenceLocateTargets(activeFile, citekey);
+			return targets.filter((target) => this.canonicalCitekey(target.citekey) === canonical);
+		}
+		return [];
+	}
+
+	async getDiscourseCanvasDetectedCitations(file: TFile): Promise<string[] | null> {
+		if (!(file instanceof TFile) || file.extension !== 'md') return null;
+		const canvasInfo = this.getDiscourseCanvasLeafAndFileForPath(file.path);
+		if (canvasInfo?.file.path !== file.path) return null;
+		const targets = await this.getDiscourseReferenceLocateTargets(file);
+		const citekeys = targets
+			.map((target) => (target.citekey || '').replace(/^@+/, '').trim())
+			.filter((citekey) => citekey.length > 0);
+		return [...new Set(citekeys)];
+	}
+
+	private getBaseReferenceLocateTargets(file: TFile, citekey: string): ReferenceLocateTarget[] {
+		if (file.extension === 'base') {
+			return [];
+		}
+		const context = this.getBaseLeafAndRootForFile(file.path);
+		if (!context) return [];
+		const canonical = this.canonicalCitekey(citekey);
+		const targets: ReferenceLocateTarget[] = [];
+		let ordinal = 0;
+		for (const element of this.getBaseLocateCandidateElements(context.root, file)) {
+			if (this.isIgnoredBaseHoverElement(element)) continue;
+			const text = this.normalizeHoverText(element.innerText || element.textContent || '');
+			if (!text) continue;
+			const mentions = citationsInText(text).filter((item) => this.canonicalCitekey(item) === canonical);
+			if (mentions.length === 0) continue;
+			const domId = element.getAttribute('data-node-id') || '';
+			for (let index = 0; index < mentions.length; index += 1) {
+				targets.push({
+					id: `base-dom:${file.path}:${domId || ordinal}:${index}`,
+					kind: 'base-dom',
+					citekey,
+					order: targets.length,
+					label: file.extension === 'canvas' ? 'Canvas node' : 'Visible cell',
+					domId: domId || undefined,
+					domKind: file.extension === 'canvas' ? 'canvas-node' : 'base-cell',
+				});
+			}
+			ordinal += 1;
+		}
+		return targets;
+	}
+
+	private async getBaseFileReferenceLocateTargets(file: TFile, citekey: string): Promise<ReferenceLocateTarget[]> {
+		if (file.extension !== 'base') return [];
+		const canonical = this.canonicalCitekey(citekey);
+		const targets: ReferenceLocateTarget[] = [];
+		for (const note of await this.getBaseCandidateNoteFiles(file)) {
+			const frontmatter = this.app.metadataCache.getFileCache(note)?.frontmatter as Record<string, unknown> | undefined;
+			const sourceRef = typeof frontmatter?.source_ref === 'string' ? frontmatter.source_ref : '';
+			const titleCitekey = note.basename.startsWith('@') ? this.canonicalCitekey(note.basename) : '';
+			if (titleCitekey === canonical) {
+				targets.push({
+					id: `base-file-note:${file.path}:${note.path}:${targets.length}`,
+					kind: 'base-dom',
+					citekey,
+					order: targets.length,
+					label: 'Base row',
+					notePath: note.path,
+					domKind: 'base-cell',
+				});
+			}
+			const sourceMentions = citationsInText(sourceRef).filter((item) => this.canonicalCitekey(item) === canonical);
+			for (let index = 0; index < sourceMentions.length; index += 1) {
+				targets.push({
+					id: `base-file-source-ref:${file.path}:${note.path}:${index}`,
+					kind: 'base-dom',
+					citekey,
+					order: targets.length,
+					label: 'Base row',
+					notePath: note.path,
+					domKind: 'base-cell',
+				});
+			}
+			const text = await this.app.vault.cachedRead(note);
+			const mentions = extractCitationMentions(text).filter((mention) => this.canonicalCitekey(mention.citekey) === canonical);
+			for (let index = 0; index < mentions.length; index += 1) {
+				targets.push({
+					id: `base-file-text:${file.path}:${note.path}:${mentions[index].from}:${index}`,
+					kind: 'base-dom',
+					citekey,
+					order: targets.length,
+					label: 'Base row',
+					notePath: note.path,
+					domKind: 'base-cell',
+				});
+			}
+		}
+		return targets;
+	}
+
+	async getReferenceLocateTargetsForActiveFile(citekey: string): Promise<ReferenceLocateTarget[]> {
+		return this.getReferenceLocateTargetsForFile(this.app.workspace.getActiveFile(), citekey);
+	}
+
+	async getNativeCanvasDetectedCitations(fileOrPath: TFile | string | null | undefined): Promise<string[]> {
+		const file = this.resolveReferenceFile(fileOrPath);
+		if (!(file instanceof TFile) || file.extension !== 'canvas') return [];
+		const nodes = await this.getNativeCanvasNodes(file);
+		const citekeys: string[] = [];
+		for (const node of nodes) {
+			const text = node.text || (node.filePath ? `[[${node.filePath}]]` : '');
+			citekeys.push(...citationsInText(text));
+			if (node.filePath) {
+				const linked = this.app.vault.getAbstractFileByPath(node.filePath);
+				if (linked instanceof TFile && linked.basename.startsWith('@')) {
+					citekeys.push(linked.basename.replace(/^@+/, ''));
+				}
+			}
+		}
+		return this.normalizeSidebarSelectedCitekeys(citekeys);
+	}
+
+	private async getBaseFileContent(file: TFile): Promise<string> {
+		try {
+			return await this.app.vault.cachedRead(file);
+		} catch {
+			return '';
+		}
+	}
+
+	private async getBaseCandidateNoteFiles(file: TFile): Promise<TFile[]> {
+		if (file.extension !== 'base') return [];
+		const raw = await this.getBaseFileContent(file);
+		const notes = this.app.vault.getMarkdownFiles();
+		if (raw.includes('file.hasProperty("nodeTypeId")')) {
+			return notes.filter((note) => {
+				const frontmatter = this.app.metadataCache.getFileCache(note)?.frontmatter as Record<string, unknown> | undefined;
+				return typeof frontmatter?.nodeTypeId === 'string' && !!frontmatter.nodeTypeId;
+			});
+		}
+		return notes;
+	}
+
+	async getBaseDetectedCitations(fileOrPath: TFile | string | null | undefined): Promise<string[]> {
+		const file = this.resolveReferenceFile(fileOrPath);
+		if (!(file instanceof TFile) || file.extension !== 'base') return [];
+		const citekeys: string[] = [];
+		for (const note of await this.getBaseCandidateNoteFiles(file)) {
+			const frontmatter = this.app.metadataCache.getFileCache(note)?.frontmatter as Record<string, unknown> | undefined;
+			if (note.basename.startsWith('@')) {
+				citekeys.push(note.basename.replace(/^@+/, ''));
+			}
+			const sourceRef = typeof frontmatter?.source_ref === 'string' ? frontmatter.source_ref : '';
+			if (sourceRef) {
+				citekeys.push(...citationsInText(sourceRef));
+			}
+			const text = await this.app.vault.cachedRead(note);
+			citekeys.push(...citationsInText(text));
+		}
+		return this.normalizeSidebarSelectedCitekeys(citekeys);
+	}
+
+	async getReferenceOccurrenceSummaryForFile(fileOrPath: TFile | string | null | undefined, citekey: string): Promise<ReferenceOccurrenceSummary> {
+		const targets = await this.getReferenceLocateTargetsForFile(fileOrPath, citekey);
+		if (targets.length === 0) return { count: 0, kind: null };
+		const kinds = new Set(targets.map((target) => target.kind === 'markdown' ? 'markdown' : 'canvas'));
+		if (kinds.size > 1) return { count: targets.length, kind: 'mixed' };
+		return { count: targets.length, kind: (Array.from(kinds)[0] || null) as ReferenceOccurrenceSummary['kind'] };
+	}
+
+	async getReferenceOccurrenceSummaryForActiveFile(citekey: string): Promise<ReferenceOccurrenceSummary> {
+		return this.getReferenceOccurrenceSummaryForFile(this.app.workspace.getActiveFile(), citekey);
+	}
+
+	async getDiscourseNodeSidebarItemsForFile(fileOrPath: TFile | string | null | undefined): Promise<DiscourseNodeSidebarItem[]> {
+		if (!this.settings.enableDiscourseGraphsCompatibility) return [];
+		await this.loadDiscourseConfigIfNeeded();
+		const activeFile = this.resolveReferenceFile(fileOrPath);
+		if (!(activeFile instanceof TFile)) return [];
+		let targets: DiscourseNodeLocateTarget[] = [];
+		if (activeFile.extension === 'md') {
+			const canvasInfo = this.getDiscourseCanvasLeafAndFileForPath(activeFile.path);
+			targets = canvasInfo?.file.path === activeFile.path
+				? await this.getCanvasDiscourseNodeLocateTargets(activeFile)
+				: await this.getMarkdownDiscourseNodeLocateTargets(activeFile);
+		} else if (activeFile.extension === 'canvas' && !this.isDiscourseCanvasLeaf(this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf())) {
+			targets = await this.getNativeCanvasDiscourseNodeLocateTargets(activeFile);
+		} else if (activeFile.extension === 'base') {
+			targets = await this.getBaseDetectedDiscourseNodeLocateTargets(activeFile);
+			if (targets.length === 0) {
+				targets = this.getBaseDiscourseNodeLocateTargets(activeFile);
+			}
+		} else if (activeFile.extension === 'canvas') {
+			targets = this.getBaseDiscourseNodeLocateTargets(activeFile);
+		}
+		if (targets.length === 0) return [];
+
+		const grouped = new Map<string, DiscourseNodeSidebarItem>();
+		for (const target of targets) {
+			const nodeType = this.getDiscourseNodeTypeById(target.nodeTypeId);
+			const groupKey = target.nodeId || `${target.nodeTypeId || 'node'}::${target.title}`;
+			const existing = grouped.get(groupKey);
+			if (existing) {
+				existing.targets.push(target);
+				continue;
+			}
+			grouped.set(groupKey, {
+				id: groupKey,
+				title: target.title,
+				filePath: target.filePath,
+				nodeTypeId: target.nodeTypeId,
+				nodeTypeName: target.nodeTypeName,
+				nodeTypeColor: nodeType?.color || '',
+				targets: [target],
+			});
+		}
+
+		return Array.from(grouped.values()).map((item) => ({
+			...item,
+			targets: item.targets.sort((a, b) => a.order - b.order),
+		}));
+	}
+
+	private async locateMarkdownNodeTarget(file: TFile, target: DiscourseNodeLocateTarget): Promise<boolean> {
+		if (!target.from || !target.to) return false;
+		return this.locateMarkdownTarget(file, {
+			id: target.id,
+			kind: 'markdown',
+			citekey: target.title,
+			order: target.order,
+			label: target.label,
+			line: target.line,
+			from: target.from,
+			to: target.to,
+		});
+	}
+
+	private async locateCanvasDiscourseNodeTarget(file: TFile, target: DiscourseNodeLocateTarget): Promise<boolean> {
+		if (!target.shapeId) return false;
+		return this.locateDiscourseTarget(file, {
+			id: target.id,
+			kind: 'canvas-node',
+			citekey: target.title,
+			order: target.order,
+			label: target.label,
+			shapeId: target.shapeId,
+			pageId: target.pageId,
+			allCitekeys: [target.title],
+		});
+	}
+
+	private async waitForBaseLocateElement(
+		context: { leaf: WorkspaceLeaf; file: TFile; root: HTMLElement },
+		resolveElement: () => HTMLElement | null,
+	): Promise<HTMLElement | null> {
+		let element: HTMLElement | null = resolveElement();
+		if (element instanceof HTMLElement) return element;
+		for (let attempt = 0; attempt < 8; attempt += 1) {
+			await new Promise<void>((resolve) => window.setTimeout(resolve, 110));
+			element = resolveElement();
+			if (element instanceof HTMLElement) return element;
+		}
+		return null;
+	}
+
+	private async locateBaseDiscourseNodeTarget(file: TFile, target: DiscourseNodeLocateTarget): Promise<boolean> {
+		const context = this.getBaseLeafAndRootForFile(file.path);
+		if (!context) return false;
+		const resolveElement = () => {
+			let element: HTMLElement | null = null;
+			if (target.domId) {
+				element = context.root.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(target.domId)}"], .canvas-node[data-node-id="${CSS.escape(target.domId)}"]`);
+			}
+			if (element instanceof HTMLElement) return element;
+			for (const candidate of this.getBaseLocateCandidateElements(context.root, file)) {
+				if (this.resolveDiscourseNodeIdFromElement(candidate, file.path) === target.nodeId) {
+					return candidate;
+				}
+			}
+			return null;
+		};
+		let element: HTMLElement | null = resolveElement();
+		if (!(element instanceof HTMLElement) && this.app.workspace.activeLeaf !== context.leaf) {
+			await this.app.workspace.setActiveLeaf(context.leaf, { focus: true });
+			element = await this.waitForBaseLocateElement(context, resolveElement);
+		}
+		if (!(element instanceof HTMLElement)) return false;
+		if (this.app.workspace.activeLeaf !== context.leaf) {
+			await this.app.workspace.setActiveLeaf(context.leaf, { focus: true });
+		}
+		const owner = file.extension === 'canvas'
+			? (element.closest<HTMLElement>('[data-node-id], .canvas-node') || element)
+			: (this.getBaseInteractionOwner(element, context.root) || element);
+		this.setBaseSelectionAnchor(file.path, [], [target.nodeId]);
+		owner.scrollIntoView({ block: 'center', behavior: 'smooth' });
+		owner.classList.add('zotsidian-base-locate-flash');
+		window.setTimeout(() => owner?.classList.remove('zotsidian-base-locate-flash'), 900);
+		if (file.extension === 'canvas' && typeof owner.click === 'function') owner.click();
+		if (typeof owner.focus === 'function') owner.focus();
+		return true;
+	}
+
+	async locateDiscourseNodeOccurrence(
+		fileOrPath: TFile | string | null | undefined,
+		nodeId: string,
+		targetId?: string,
+	): Promise<boolean> {
+		const activeFile = this.resolveReferenceFile(fileOrPath);
+		if (!(activeFile instanceof TFile)) return false;
+		const items = await this.getDiscourseNodeSidebarItemsForFile(activeFile);
+		const item = items.find((entry) => entry.id === nodeId);
+		if (!item || item.targets.length === 0) return false;
+		let target: DiscourseNodeLocateTarget | undefined;
+		if (targetId) {
+			target = item.targets.find((entry) => entry.id === targetId);
+		} else {
+			target = item.targets[0];
+		}
+		if (!target) return false;
+		if (target.kind === 'markdown-node-link') {
+			return this.locateMarkdownNodeTarget(activeFile, target);
+		}
+		if (target.kind === 'base-node-link') {
+			return this.locateBaseDiscourseNodeTarget(activeFile, target);
+		}
+		return this.locateCanvasDiscourseNodeTarget(activeFile, target);
+	}
+
+	private getMarkdownLocateLeaf(file: TFile): WorkspaceLeaf | null {
+		const leaves = this.app.workspace.getLeavesOfType('markdown');
+		const exact = leaves.find((leaf) => this.getLeafFile(leaf)?.path === file.path);
+		return exact || leaves[0] || null;
+	}
+
+	private async locateMarkdownTarget(file: TFile, target: ReferenceLocateTarget): Promise<boolean> {
+		const leaf = this.getMarkdownLocateLeaf(file);
+		if (!leaf || !(leaf.view instanceof MarkdownView)) return false;
+		const view = leaf.view;
+		const editor = view.editor;
+		if (!editor || !target.from || !target.to) return false;
+		const from = target.from;
+		const to = target.to;
+		if (this.app.workspace.activeLeaf !== leaf) {
+			await this.app.workspace.setActiveLeaf(leaf, { focus: true });
+		}
+		editor.setSelection(from, to);
+		const cm = (editor as unknown as { cm?: { scrollIntoView?: (range: unknown, margin?: number) => void; focus?: () => void } }).cm;
+		cm?.focus?.();
+		cm?.scrollIntoView?.({ from, to }, 80);
+		if (this._markdownLocateFlashTimer != null) {
+			window.clearTimeout(this._markdownLocateFlashTimer);
+			this._markdownLocateFlashTimer = null;
+		}
+		this._markdownLocateFlashTimer = window.setTimeout(() => {
+			this._markdownLocateFlashTimer = null;
+			if (this.getLeafFile(leaf)?.path !== file.path) return;
+			if (!(leaf.view instanceof MarkdownView)) return;
+			leaf.view.editor.setSelection(to, to);
+			leaf.view.editor.setCursor(to);
+		}, 720);
+		return true;
+	}
+
+	private async locateBaseDomTarget(file: TFile, target: ReferenceLocateTarget): Promise<boolean> {
+		const context = this.getBaseLeafAndRootForFile(file.path);
+		if (!context) return false;
+		const resolveElement = () => {
+			let element: HTMLElement | null = null;
+			if (target.domKind === 'canvas-node' && target.domId) {
+				element = context.root.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(target.domId)}"], .canvas-node[data-node-id="${CSS.escape(target.domId)}"]`);
+			}
+			if (element instanceof HTMLElement) return element;
+			const matches: HTMLElement[] = [];
+			for (const candidate of this.getBaseLocateCandidateElements(context.root, file)) {
+				if (this.isIgnoredBaseHoverElement(candidate)) continue;
+				if (file.extension === 'base' && target.notePath) {
+					const linkedNodeId = this.resolveDiscourseNodeIdFromElement(candidate, file.path);
+					if (linkedNodeId === target.notePath) {
+						return candidate;
+					}
+				}
+				const text = this.normalizeHoverText(candidate.innerText || candidate.textContent || '');
+				if (!text) continue;
+				const mentions = citationsInText(text).filter((item) => this.canonicalCitekey(item) === this.canonicalCitekey(target.citekey));
+				if (mentions.length > 0) {
+					matches.push(candidate);
+				}
+			}
+			return matches[target.order] || matches[0] || null;
+		};
+		let element: HTMLElement | null = resolveElement();
+		if (!(element instanceof HTMLElement) && this.app.workspace.activeLeaf !== context.leaf) {
+			await this.app.workspace.setActiveLeaf(context.leaf, { focus: true });
+			element = await this.waitForBaseLocateElement(context, resolveElement);
+		}
+		if (!(element instanceof HTMLElement)) return false;
+		if (this.app.workspace.activeLeaf !== context.leaf) {
+			await this.app.workspace.setActiveLeaf(context.leaf, { focus: true });
+		}
+		const owner = target.domKind === 'canvas-node'
+			? (element.closest<HTMLElement>('[data-node-id], .canvas-node') || element)
+			: (this.getBaseInteractionOwner(element, context.root) || element);
+		this.setBaseSelectionAnchor(file.path, [target.citekey], []);
+		owner.scrollIntoView({ block: 'center', behavior: 'smooth' });
+		owner.classList.add('zotsidian-base-locate-flash');
+		window.setTimeout(() => owner?.classList.remove('zotsidian-base-locate-flash'), 900);
+		if (target.domKind === 'canvas-node' && typeof owner.click === 'function') {
+			owner.click();
+		}
+		if (typeof owner.focus === 'function') {
+			owner.focus();
+		}
+		return true;
+	}
+
+	private async locateDiscourseTarget(file: TFile, target: ReferenceLocateTarget): Promise<boolean> {
+		const canvasInfo = this.getDiscourseCanvasLeafAndFileForPath(file.path);
+		if (!canvasInfo || canvasInfo.file.path !== file.path || !target.shapeId) return false;
+		this._discourseLocateSuppressUntil = Date.now() + 2200;
+
+		if (this.app.workspace.activeLeaf !== canvasInfo.leaf) {
+			await this.app.workspace.setActiveLeaf(canvasInfo.leaf, { focus: true });
+			await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+		}
+
+		const rendered = this.getRenderedDiscourseShapeElement(canvasInfo.root, target.shapeId);
+		const model = await this.getDiscourseCanvasModel(file);
+		const waitFrames = async (count: number = 1) => {
+			for (let index = 0; index < count; index += 1) {
+				await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+			}
+		};
+
+		if (this.applyDiscourseLocateState(canvasInfo.leaf, canvasInfo.root, target, model)) {
+			await waitFrames(3);
+		}
+
+		void rendered;
+		const nextCitekeys = target.allCitekeys && target.allCitekeys.length > 1 ? target.allCitekeys : [target.citekey];
+		await this.setSidebarSelectedContext(
+			{
+				kind: nextCitekeys.length > 1 ? 'multi' : target.kind === 'canvas-node' ? 'node' : 'text',
+				citekeys: nextCitekeys,
+				source: 'canvas-selection',
+			},
+			file.path
+		);
+		return true;
+	}
+
+	async locateReferenceOccurrence(
+		fileOrPath: TFile | string | null | undefined,
+		citekey: string,
+		targetId?: string
+	): Promise<boolean> {
+		const activeFile = this.resolveReferenceFile(fileOrPath);
+		if (!(activeFile instanceof TFile)) return false;
+		const targets = await this.getReferenceLocateTargetsForFile(activeFile, citekey);
+		if (targets.length === 0) return false;
+		let target: ReferenceLocateTarget | undefined;
+		if (targetId) {
+			target = targets.find((item) => item.id === targetId);
+			if (!target) return false;
+		} else {
+			const cycleKey = this.getReferenceLocateCycleKey(activeFile.path, citekey);
+			const nextIndex = (this._referenceLocateCycleByKey.get(cycleKey) || 0) % targets.length;
+			this._referenceLocateCycleByKey.set(cycleKey, nextIndex + 1);
+			target = targets[nextIndex];
+		}
+		if (!target) return false;
+		if (target.kind === 'markdown') {
+			return this.locateMarkdownTarget(activeFile, target);
+		}
+		if (target.kind === 'base-dom') {
+			return this.locateBaseDomTarget(activeFile, target);
+		}
+		return this.locateDiscourseTarget(activeFile, target);
+	}
+
+	async locateNextReferenceOccurrence(fileOrPath: TFile | string | null | undefined, citekey: string): Promise<boolean> {
+		return this.locateReferenceOccurrence(fileOrPath, citekey);
+	}
+
+	async locateNextReferenceOccurrenceInActiveFile(citekey: string): Promise<boolean> {
+		return this.locateNextReferenceOccurrence(this.app.workspace.getActiveFile(), citekey);
+	}
+
 	private extractVisibleBaseCitationsFromLeaf(leaf: WorkspaceLeaf | null): string[] {
 		const root = this.getBaseViewRoot(leaf);
 		if (!(root instanceof HTMLElement)) return [];
+		const file = this.getLeafFile(leaf) ?? this.app.workspace.getActiveFile();
+		if (this.isDiscourseCanvasLeaf(leaf)) {
+			if (file instanceof TFile) {
+				const model = this.getCachedDiscourseCanvasModel(file.path);
+				if (model) {
+					const pageId = this.getDiscourseCanvasActivePageId(root, model);
+					if (pageId) {
+						const ordered = model.pageCitekeys.get(pageId) || [];
+						this.discourseDebug('visible-citations', {
+							filePath: file.path,
+							pageId,
+							citekeys: this.summarizeCitekeys(ordered),
+						});
+						if (ordered.length > 0) {
+							return [...ordered];
+						}
+					}
+					this.discourseDebug('visible-citations-empty-page', {
+						filePath: file.path,
+						pageId,
+					});
+				} else {
+					this.discourseDebug('visible-citations-no-model', { filePath: file.path });
+				}
+			}
+		}
 		const text = root.innerText || root.textContent || '';
 		return citationsInText(text);
 	}
 
+	async refreshActiveScopeAndView(forceIndex: boolean = true) {
+		const activeFile = this.app.workspace.getActiveFile();
+		const cache = activeFile ? this.app.metadataCache.getFileCache(activeFile) : null;
+		const scope = this.resolveScopeFromFrontmatter(cache?.frontmatter as Record<string, unknown> | undefined);
+		if (forceIndex) {
+			try {
+				await this.ensureCitationIndex(scope, true);
+			} catch (_err) {
+				// Let the view render the degraded/offline state instead of throwing.
+			}
+		}
+		await this.refreshSidebarView();
+	}
+
 	getVisibleCitationsFromActiveContext(activeFile: TFile | null): string[] | null {
-		if (!(activeFile instanceof TFile) || (activeFile.extension !== 'base' && activeFile.extension !== 'canvas')) return null;
 		const leaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
+		if (!(activeFile instanceof TFile)) return null;
 		if (!this.isBaseLeaf(leaf)) return null;
 		return this.extractVisibleBaseCitationsFromLeaf(leaf);
+	}
+
+	async primeVisibleCitationsFromActiveContext(activeFile: TFile | null): Promise<void> {
+		const leaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
+		if (!(activeFile instanceof TFile) || !this.isDiscourseCanvasLeaf(leaf)) return;
+		await this.getDiscourseCanvasModel(activeFile);
+	}
+
+	isActiveDiscourseCanvasLeaf(): boolean {
+		const leaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
+		return this.isDiscourseCanvasLeaf(leaf);
+	}
+
+	shouldShowDiscourseGraphsCompatibilityHint(): boolean {
+		return false;
 	}
 
 	private clearBaseViewObserver() {
@@ -720,9 +2316,21 @@ export default class ZotsidianPlugin extends Plugin {
 			this._baseViewObserver.disconnect();
 			this._baseViewObserver = null;
 		}
+		if (this._baseViewRootCleanup) {
+			this._baseViewRootCleanup();
+			this._baseViewRootCleanup = null;
+		}
 		if (this._baseViewRefreshTimer != null) {
 			window.clearTimeout(this._baseViewRefreshTimer);
 			this._baseViewRefreshTimer = null;
+		}
+		if (this._discourseSelectionSyncTimer != null) {
+			window.clearTimeout(this._discourseSelectionSyncTimer);
+			this._discourseSelectionSyncTimer = null;
+		}
+		if (this._discourseStatePollTimer != null) {
+			window.clearInterval(this._discourseStatePollTimer);
+			this._discourseStatePollTimer = null;
 		}
 	}
 
@@ -741,10 +2349,944 @@ export default class ZotsidianPlugin extends Plugin {
 			this._baseViewRefreshTimer = null;
 			const leaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
 			const file = this.getLeafFile(leaf) ?? this.app.workspace.getActiveFile();
-			if (!(file instanceof TFile) || (file.extension !== 'base' && file.extension !== 'canvas') || !this.isBaseLeaf(leaf)) return;
-			await this.view?.refreshReferences();
-			await this.view?.renderReferences();
+			if (!(file instanceof TFile) || !this.isBaseLeaf(leaf)) return;
+			await this.refreshSidebarView();
 		}, 140);
+	}
+
+	private getCanvasLikeLeafAndFile(): { leaf: WorkspaceLeaf; file: TFile; root: HTMLElement } | null {
+		const leaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
+		if (!leaf) return null;
+		const file = this.getLeafFile(leaf) ?? this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || !this.isDiscourseCanvasLeaf(leaf)) return null;
+		const root = this.getBaseViewRoot(leaf);
+		if (!(root instanceof HTMLElement)) return null;
+		return { leaf, file, root };
+	}
+
+	private getDiscourseCanvasLeafAndFileForPath(filePath: string): { leaf: WorkspaceLeaf; file: TFile; root: HTMLElement } | null {
+		if (!filePath) return null;
+		const leaves = new Set<WorkspaceLeaf>();
+		const activeLeaf = this.app.workspace.activeLeaf;
+		const recentLeaf = this.app.workspace.getMostRecentLeaf();
+		if (activeLeaf) leaves.add(activeLeaf);
+		if (recentLeaf) leaves.add(recentLeaf);
+		for (const leaf of this.app.workspace.getLeavesOfType('tldraw-dg-preview')) {
+			leaves.add(leaf);
+		}
+		for (const leaf of leaves) {
+			const file = this.getLeafFile(leaf);
+			if (!(file instanceof TFile) || file.path !== filePath || !this.isDiscourseCanvasLeaf(leaf)) continue;
+			const root = this.getBaseViewRoot(leaf);
+			if (!(root instanceof HTMLElement)) continue;
+			return { leaf, file, root };
+		}
+		return null;
+	}
+
+	private extractDiscourseCanvasJson(markdown: string): string | null {
+		const match = markdown.match(
+			/```json !!!_START_OF_TLDRAW_DG_DATA__DO_NOT_CHANGE_THIS_PHRASE_!!!\s*([\s\S]*?)\s*!!!_END_OF_TLDRAW_DG_DATA__DO_NOT_CHANGE_THIS_PHRASE_!!!\s*```/
+		);
+		if (match?.[1]?.trim()) {
+			return match[1].trim();
+		}
+		const fallback = markdown.match(/```json !!!_START_OF_TLDRAW_DG_DATA__DO_NOT_CHANGE_THIS_PHRASE_!!!\s*([\s\S]*?)\s*```/);
+		return fallback?.[1]?.trim() || null;
+	}
+
+	private extractCitekeyFromDiscourseNodeTitle(title: string): string | null {
+		const text = title.trim();
+		if (!text) return null;
+		const mentions = citationsInText(text);
+		if (mentions.length > 0) return mentions[0];
+		if (text.startsWith('@')) {
+			return text.replace(/^@+/, '').trim() || null;
+		}
+		return null;
+	}
+
+	private extractPlainTextFromTldrawRichText(value: unknown): string {
+		if (!value) return '';
+		if (typeof value === 'string') return value;
+		if (Array.isArray(value)) {
+			return value.map((entry) => this.extractPlainTextFromTldrawRichText(entry)).join('');
+		}
+		if (typeof value !== 'object') return '';
+		const record = value as Record<string, unknown>;
+		const text = typeof record.text === 'string' ? record.text : '';
+		const content = Array.isArray(record.content) ? record.content : [];
+		const nested = content.map((entry) => this.extractPlainTextFromTldrawRichText(entry)).join('');
+		const joiner = record.type === 'paragraph' || record.type === 'hardBreak' ? '\n' : '';
+		return `${text}${nested}${joiner}`;
+	}
+
+	private estimateDiscourseTextHeight(size: string, text: string): number {
+		const normalized = size || 'm';
+		const lineHeightMap: Record<string, number> = {
+			s: 22,
+			m: 30,
+			l: 38,
+			xl: 52,
+		};
+		const lineHeight = lineHeightMap[normalized] || 30;
+		const lineCount = Math.max(1, text.split(/\r?\n/).length);
+		return Math.max(lineHeight + 12, lineCount * lineHeight + 14);
+	}
+
+	private getCachedDiscourseCanvasModel(filePath: string): DiscourseCanvasModel | null {
+		return this._discourseCanvasNodesByFile.get(filePath) || null;
+	}
+
+	private getCachedDiscourseCanvasNodeMap(filePath: string): Map<string, DiscourseCanvasNodeEntry> | null {
+		return this.getCachedDiscourseCanvasModel(filePath)?.nodes || null;
+	}
+
+	private parseDiscourseCanvasRecords(records: Array<Record<string, unknown>>, mtime: number): DiscourseCanvasModel {
+		const nodes = new Map<string, DiscourseCanvasNodeEntry>();
+		const textShapes: DiscourseCanvasTextEntry[] = [];
+		const pageCitekeys = new Map<string, string[]>();
+		const cameras = new Map<string, DiscourseCanvasCameraEntry>();
+		const pageNames = new Map<string, string>();
+		let currentPageId: string | null = null;
+		const pushPageCitekey = (pageId: string, citekey: string | null) => {
+			const normalized = (citekey || '').replace(/^@+/, '').trim();
+			if (!pageId || !normalized) return;
+			const list = pageCitekeys.get(pageId) || [];
+			if (!list.includes(normalized)) {
+				list.push(normalized);
+				pageCitekeys.set(pageId, list);
+			}
+		};
+
+		for (const record of records) {
+			if (!record || typeof record !== 'object') continue;
+			const recordId = typeof record.id === 'string' ? record.id : '';
+			const typeName = typeof record.typeName === 'string' ? record.typeName : '';
+			if (typeName === 'instance' && typeof record.currentPageId === 'string') {
+				currentPageId = record.currentPageId;
+				continue;
+			}
+			if (typeName === 'page' && recordId.startsWith('page:')) {
+				const pageName = typeof record.name === 'string' ? record.name : recordId.replace(/^page:/, '');
+				pageNames.set(recordId, pageName);
+				continue;
+			}
+			if (typeName === 'camera' && typeof record.pageId === 'string') {
+				cameras.set(record.pageId, {
+					pageId: record.pageId,
+					x: typeof record.x === 'number' ? record.x : 0,
+					y: typeof record.y === 'number' ? record.y : 0,
+					z: typeof record.z === 'number' && record.z > 0 ? record.z : 1,
+				});
+				continue;
+			}
+
+			const shapeId = recordId;
+			if (!shapeId.startsWith('shape:')) continue;
+			const pageId = typeof record.parentId === 'string' ? record.parentId : '';
+			if (!pageId.startsWith('page:')) continue;
+			const safeProps = (record.props && typeof record.props === 'object') ? record.props as Record<string, unknown> : {};
+			const x = typeof record.x === 'number' ? record.x : 0;
+			const y = typeof record.y === 'number' ? record.y : 0;
+			const w = typeof safeProps.w === 'number' ? safeProps.w : 0;
+			const h = typeof safeProps.h === 'number' ? safeProps.h : 0;
+
+			if (record?.type === 'discourse-node') {
+				const title = typeof safeProps.title === 'string' ? safeProps.title : '';
+				const src = typeof safeProps.src === 'string' ? safeProps.src : '';
+				const nodeTypeId = typeof safeProps.nodeTypeId === 'string' ? safeProps.nodeTypeId : null;
+				const citekey = this.extractCitekeyFromDiscourseNodeTitle(title);
+				nodes.set(shapeId, {
+					shapeId,
+					pageId,
+					x,
+					y,
+					w,
+					h,
+					title,
+					src,
+					nodeTypeId,
+					citekey,
+				});
+				pushPageCitekey(pageId, citekey);
+				continue;
+			}
+
+			if (record?.type === 'text') {
+				const text = this.normalizeHoverText(
+					this.extractPlainTextFromTldrawRichText(safeProps.richText)
+					|| (typeof safeProps.text === 'string' ? safeProps.text : ''),
+				);
+				if (!text) continue;
+				const citekeys = citationsInText(text);
+				if (citekeys.length === 0) continue;
+				const size = typeof safeProps.size === 'string' ? safeProps.size : 'm';
+				textShapes.push({
+					shapeId,
+					pageId,
+					x,
+					y,
+					w,
+					h: h > 0 ? h : this.estimateDiscourseTextHeight(size, text),
+					text,
+					citekeys,
+					primaryCitekey: citekeys.length === 1 ? citekeys[0] : null,
+				});
+				for (const citekey of citekeys) {
+					pushPageCitekey(pageId, citekey);
+				}
+			}
+		}
+
+		return {
+			mtime,
+			nodes,
+			textShapes,
+			pageCitekeys,
+			cameras,
+			pageNames,
+			currentPageId,
+		};
+	}
+
+	private getDiscourseViewStore(leaf: WorkspaceLeaf | null): {
+		allRecords?: () => Array<Record<string, unknown>>;
+		records?: { values?: () => Iterable<Record<string, unknown>> };
+		get?: (id: string) => Record<string, unknown> | undefined;
+		has?: (id: string) => boolean;
+		put?: (records: Array<Record<string, unknown>>) => void;
+		atomic?: (cb: () => void) => void;
+		listen?: (cb: () => void) => (() => void) | void;
+	} | null {
+		const store = (leaf?.view as {
+			store?: {
+				allRecords?: () => Array<Record<string, unknown>>;
+				records?: { values?: () => Iterable<Record<string, unknown>> };
+				get?: (id: string) => Record<string, unknown> | undefined;
+				has?: (id: string) => boolean;
+				put?: (records: Array<Record<string, unknown>>) => void;
+				atomic?: (cb: () => void) => void;
+				listen?: (cb: () => void) => (() => void) | void;
+			};
+		} | undefined)?.store;
+		return store || null;
+	}
+
+	private getDiscourseStoreRecords(leaf: WorkspaceLeaf | null): Array<Record<string, unknown>> {
+		const store = this.getDiscourseViewStore(leaf);
+		if (!store) return [];
+		try {
+			if (typeof store.allRecords === 'function') {
+				return store.allRecords().filter((record): record is Record<string, unknown> => !!record && typeof record === 'object');
+			}
+			if (store.records && typeof store.records.values === 'function') {
+				return Array.from(store.records.values()).filter((record): record is Record<string, unknown> => !!record && typeof record === 'object');
+			}
+		} catch {
+			return [];
+		}
+		return [];
+	}
+
+	private getDiscourseStoreCurrentPageId(leaf: WorkspaceLeaf | null): string | null {
+		const records = this.getDiscourseStoreRecords(leaf);
+		const instance = records.find((record) => record?.typeName === 'instance' && typeof record.currentPageId === 'string');
+		return typeof instance?.currentPageId === 'string' ? instance.currentPageId : null;
+	}
+
+	private getDiscourseStoreCurrentPageState(leaf: WorkspaceLeaf | null): Record<string, unknown> | null {
+		const currentPageId = this.getDiscourseStoreCurrentPageId(leaf);
+		if (!currentPageId) return null;
+		return this.getDiscourseStorePageStateRecord(leaf, currentPageId);
+	}
+
+	private getDiscourseStorePageStateRecord(leaf: WorkspaceLeaf | null, pageId: string | null): Record<string, unknown> | null {
+		if (!pageId) return null;
+		const records = this.getDiscourseStoreRecords(leaf);
+		const pageState = records.find(
+			(record) => record?.typeName === 'instance_page_state' && record.pageId === pageId,
+		);
+		return pageState || null;
+	}
+
+	private getDiscourseStoreSelectedShapeIds(leaf: WorkspaceLeaf | null): string[] {
+		const pageState = this.getDiscourseStoreCurrentPageState(leaf);
+		const selected = pageState?.selectedShapeIds;
+		return Array.isArray(selected) ? selected.filter((id): id is string => typeof id === 'string') : [];
+	}
+
+	private getDiscourseStoreHoveredShapeId(leaf: WorkspaceLeaf | null): string | null {
+		const pageState = this.getDiscourseStoreCurrentPageState(leaf);
+		return typeof pageState?.hoveredShapeId === 'string' ? pageState.hoveredShapeId : null;
+	}
+
+	private getDiscourseStoreInstanceRecord(leaf: WorkspaceLeaf | null): Record<string, unknown> | null {
+		const records = this.getDiscourseStoreRecords(leaf);
+		return records.find((record) => record?.typeName === 'instance' && record.id === 'instance:instance') || null;
+	}
+
+	private getDiscourseStoreCameraRecord(leaf: WorkspaceLeaf | null, pageId: string | null): Record<string, unknown> | null {
+		if (!pageId) return null;
+		const records = this.getDiscourseStoreRecords(leaf);
+		return records.find((record) => record?.typeName === 'camera' && record.id === `camera:${pageId}`) || null;
+	}
+
+	private getDiscourseLocateTargetBounds(
+		model: DiscourseCanvasModel | null,
+		target: ReferenceLocateTarget,
+	): { x: number; y: number; w: number; h: number } | null {
+		if (!model || !target.shapeId) return null;
+		const node = model.nodes.get(target.shapeId);
+		if (node) {
+			return { x: node.x, y: node.y, w: node.w, h: node.h };
+		}
+		const textShape = model.textShapes.find((entry) => entry.shapeId === target.shapeId);
+		if (textShape) {
+			return { x: textShape.x, y: textShape.y, w: textShape.w, h: textShape.h };
+		}
+		return null;
+	}
+
+	private computeDiscourseLocateCamera(
+		root: HTMLElement,
+		currentCamera: { x: number; y: number; z: number } | null,
+		targetBounds: { x: number; y: number; w: number; h: number } | null,
+	): { x: number; y: number; z: number } | null {
+		if (!targetBounds) return null;
+		const viewport = this.getDiscourseCanvasViewport(root);
+		const rect = viewport.getBoundingClientRect();
+		if (!rect.width || !rect.height) return null;
+		const nextZoom = currentCamera?.z && currentCamera.z > 0 ? currentCamera.z : 1;
+		const centerX = targetBounds.x + ((targetBounds.w || 0) / 2);
+		const centerY = targetBounds.y + ((targetBounds.h || 0) / 2);
+		return {
+			x: -centerX + rect.width / (2 * nextZoom),
+			y: -centerY + rect.height / (2 * nextZoom),
+			z: nextZoom,
+		};
+	}
+
+	private applyDiscourseLocateState(
+		leaf: WorkspaceLeaf | null,
+		root: HTMLElement,
+		target: ReferenceLocateTarget,
+		model: DiscourseCanvasModel | null,
+	): boolean {
+		const store = this.getDiscourseViewStore(leaf);
+		if (!store || typeof store.put !== 'function') return false;
+
+		const targetPageId = target.pageId || this.getDiscourseStoreCurrentPageId(leaf) || model?.currentPageId || null;
+		const instance = this.getDiscourseStoreInstanceRecord(leaf);
+		const pageState = this.getDiscourseStorePageStateRecord(leaf, targetPageId);
+		if (!instance || !pageState || !targetPageId) return false;
+
+		const nextRecords: Record<string, unknown>[] = [];
+		if (instance.currentPageId !== targetPageId) {
+			nextRecords.push({ ...instance, currentPageId: targetPageId });
+		}
+
+		const selectedShapeIds = [target.shapeId].filter((shapeId): shapeId is string => typeof shapeId === 'string' && !!shapeId);
+		const currentSelectedShapeIds = Array.isArray(pageState.selectedShapeIds)
+			? pageState.selectedShapeIds.filter((shapeId): shapeId is string => typeof shapeId === 'string')
+			: [];
+		const sameSelection = currentSelectedShapeIds.length === selectedShapeIds.length
+			&& currentSelectedShapeIds.every((shapeId, index) => shapeId === selectedShapeIds[index]);
+		if (!sameSelection || pageState.editingShapeId !== null || pageState.hoveredShapeId !== null) {
+			nextRecords.push({
+				...pageState,
+				selectedShapeIds,
+				editingShapeId: null,
+				hoveredShapeId: null,
+			});
+		}
+
+		const camera = this.getDiscourseStoreCameraRecord(leaf, targetPageId);
+		const nextCamera = this.computeDiscourseLocateCamera(
+			root,
+			camera ? {
+				x: typeof camera.x === 'number' ? camera.x : 0,
+				y: typeof camera.y === 'number' ? camera.y : 0,
+				z: typeof camera.z === 'number' && camera.z > 0 ? camera.z : 1,
+			} : null,
+			this.getDiscourseLocateTargetBounds(model, target),
+		);
+		if (camera && nextCamera) {
+			const cameraChanged =
+				Math.abs((typeof camera.x === 'number' ? camera.x : 0) - nextCamera.x) > 0.5
+				|| Math.abs((typeof camera.y === 'number' ? camera.y : 0) - nextCamera.y) > 0.5
+				|| Math.abs((typeof camera.z === 'number' ? camera.z : 1) - nextCamera.z) > 0.01;
+			if (cameraChanged) {
+				nextRecords.push({
+					...camera,
+					x: nextCamera.x,
+					y: nextCamera.y,
+					z: nextCamera.z,
+				});
+			}
+		}
+
+		if (nextRecords.length === 0) return true;
+		try {
+			if (typeof store.atomic === 'function') {
+				store.atomic(() => {
+					store.put?.(nextRecords);
+				});
+			} else {
+				store.put(nextRecords);
+			}
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private resolveSelectedDiscourseContextFromStore(
+		leaf: WorkspaceLeaf | null,
+		filePath: string,
+	): Omit<SidebarSelectedContext, 'filePath'> | null {
+		const model = this.getCachedDiscourseCanvasModel(filePath);
+		if (!model) return null;
+		const selectedShapeIds = this.getDiscourseStoreSelectedShapeIds(leaf);
+		if (selectedShapeIds.length === 0) return null;
+		const currentPageId = this.getDiscourseStoreCurrentPageId(leaf) || model.currentPageId;
+		const scopedShapeIds = currentPageId
+			? selectedShapeIds.filter((shapeId) => {
+				const node = model.nodes.get(shapeId);
+				if (node) return node.pageId === currentPageId;
+				const text = model.textShapes.find((entry) => entry.shapeId === shapeId);
+				return text?.pageId === currentPageId;
+			})
+			: selectedShapeIds;
+		const shapeIds = scopedShapeIds.length > 0 ? scopedShapeIds : selectedShapeIds;
+		if (shapeIds.length === 0) return null;
+
+		const citekeys: string[] = [];
+		const pushCitekeys = (values: string[]) => {
+			for (const value of values) {
+				const clean = (value || '').replace(/^@+/, '').trim();
+				if (clean) citekeys.push(clean);
+			}
+		};
+
+		let singleKind: SidebarSelectedContextKind | null = null;
+		if (shapeIds.length === 1) {
+			const node = model.nodes.get(shapeIds[0]);
+			if (node?.citekey) {
+				singleKind = 'node';
+				pushCitekeys([node.citekey]);
+			} else {
+				const text = model.textShapes.find((entry) => entry.shapeId === shapeIds[0]);
+				if (text?.citekeys?.length) {
+					singleKind = text.citekeys.length === 1 ? 'text' : 'multi';
+					pushCitekeys(text.citekeys);
+				}
+			}
+		} else {
+			for (const shapeId of shapeIds) {
+				const node = model.nodes.get(shapeId);
+				if (node?.citekey) {
+					pushCitekeys([node.citekey]);
+					continue;
+				}
+				const text = model.textShapes.find((entry) => entry.shapeId === shapeId);
+				if (text?.citekeys?.length) {
+					pushCitekeys(text.citekeys);
+				}
+			}
+		}
+
+		const normalized = this.normalizeSidebarSelectedCitekeys(citekeys);
+		if (normalized.length === 0) return null;
+		return {
+			kind: normalized.length > 1 ? 'multi' : (singleKind || 'multi'),
+			citekeys: normalized,
+			source: 'canvas-selection',
+		};
+	}
+
+	private async resolveSelectedDiscourseNodeIdsFromStore(leaf: WorkspaceLeaf | null, filePath: string): Promise<string[]> {
+		const model = this.getCachedDiscourseCanvasModel(filePath);
+		if (!model) return [];
+		const selectedShapeIds = this.getDiscourseStoreSelectedShapeIds(leaf);
+		if (selectedShapeIds.length === 0) return [];
+		const file = this.resolveReferenceFile(filePath);
+		if (!(file instanceof TFile)) return [];
+		const currentPageId = this.getDiscourseStoreCurrentPageId(leaf) || model.currentPageId;
+		const shapeIds = currentPageId
+			? selectedShapeIds.filter((shapeId) => model.nodes.get(shapeId)?.pageId === currentPageId)
+			: selectedShapeIds;
+		const nodeIds: string[] = [];
+		for (const shapeId of shapeIds) {
+			const node = model.nodes.get(shapeId);
+			if (!node?.nodeTypeId || !this.shouldShowDiscourseNodeType(node.nodeTypeId)) continue;
+			const linkedFile =
+				(node.src ? await this.resolveDiscourseNodeFileFromSrc(file, node.src) : null)
+				|| this.resolveDiscourseNodeFileFromTitle(node.title || '', file.path);
+			nodeIds.push(linkedFile?.path || `${file.path}::${node.shapeId}`);
+		}
+		return Array.from(new Set(nodeIds.filter(Boolean)));
+	}
+
+	private resolveSelectedDiscourseSourceNodeFromStore(leaf: WorkspaceLeaf | null, filePath: string): string | null {
+		const model = this.getCachedDiscourseCanvasModel(filePath);
+		if (!model) return null;
+		const selectedShapeIds = this.getDiscourseStoreSelectedShapeIds(leaf);
+		if (selectedShapeIds.length === 0) return null;
+		const selectedNodes = selectedShapeIds
+			.map((shapeId) => model.nodes.get(shapeId))
+			.filter((entry): entry is DiscourseCanvasNodeEntry => !!entry && !!entry.citekey);
+		if (selectedNodes.length === 0) return null;
+		if (selectedNodes.length === 1) return selectedNodes[0].citekey || null;
+		const currentPageId = this.getDiscourseStoreCurrentPageId(leaf) || model.currentPageId;
+		const currentPageNodes = currentPageId
+			? selectedNodes.filter((entry) => entry.pageId === currentPageId)
+			: selectedNodes;
+		return currentPageNodes[0]?.citekey || selectedNodes[0]?.citekey || null;
+	}
+
+	private resolveHoveredDiscourseTextFromStore(
+		leaf: WorkspaceLeaf | null,
+		filePath: string,
+		root: HTMLElement,
+	): { citekey: string; element: HTMLElement | null } | null {
+		const hoveredShapeId = this.getDiscourseStoreHoveredShapeId(leaf);
+		if (!hoveredShapeId) return null;
+		const model = this.getCachedDiscourseCanvasModel(filePath);
+		if (!model) return null;
+		const textShape = model.textShapes.find((entry) => entry.shapeId === hoveredShapeId && !!entry.primaryCitekey);
+		if (!textShape?.primaryCitekey) return null;
+		return {
+			citekey: textShape.primaryCitekey,
+			element: this.getRenderedDiscourseShapeElement(root, textShape.shapeId),
+		};
+	}
+
+	private async getDiscourseCanvasModel(file: TFile): Promise<DiscourseCanvasModel> {
+		const liveCanvas = this.getDiscourseCanvasLeafAndFileForPath(file.path);
+		if (liveCanvas?.file.path === file.path) {
+			const liveRecords = this.getDiscourseStoreRecords(liveCanvas.leaf);
+			if (liveRecords.length > 0) {
+				const liveModel = this.parseDiscourseCanvasRecords(liveRecords, Date.now());
+				this._discourseCanvasNodesByFile.set(file.path, liveModel);
+				return liveModel;
+			}
+		}
+		const cached = this._discourseCanvasNodesByFile.get(file.path);
+		if (cached && cached.mtime === file.stat.mtime) {
+			return cached;
+		}
+		try {
+			const markdown = await this.app.vault.cachedRead(file);
+			const payload = this.extractDiscourseCanvasJson(markdown);
+			if (!payload) {
+				const emptyModel = this.parseDiscourseCanvasRecords([], file.stat.mtime);
+				this._discourseCanvasNodesByFile.set(file.path, emptyModel);
+				return emptyModel;
+			}
+
+			const parsed = JSON.parse(payload) as {
+				raw?: { records?: Array<Record<string, unknown>> };
+			};
+			const rawRecords = parsed?.raw?.records;
+			const records = Array.isArray(rawRecords)
+				? rawRecords.filter((record): record is Record<string, unknown> => !!record && typeof record === 'object')
+				: [];
+			const model = this.parseDiscourseCanvasRecords(records, file.stat.mtime);
+			this._discourseCanvasNodesByFile.set(file.path, model);
+			return model;
+		} catch (_err) {
+			// Keep compatibility mode best-effort.
+		}
+		const model = this.parseDiscourseCanvasRecords([], file.stat.mtime);
+		this._discourseCanvasNodesByFile.set(file.path, model);
+		return model;
+	}
+
+	private async getDiscourseCanvasNodeMap(file: TFile): Promise<Map<string, DiscourseCanvasNodeEntry>> {
+		const model = await this.getDiscourseCanvasModel(file);
+		return model.nodes;
+	}
+
+	private getDiscourseCanvasViewport(root: HTMLElement): HTMLElement {
+		return (
+			root.querySelector<HTMLElement>('.tl-canvas') ||
+			root.querySelector<HTMLElement>('.tl-canvas__canvas') ||
+			root.querySelector<HTMLElement>('.tl-shapes') ||
+			root
+		);
+	}
+
+	private getDiscourseCanvasActivePageId(root: HTMLElement, model: DiscourseCanvasModel): string | null {
+		const visibleShapeIds = Array.from(root.querySelectorAll<HTMLElement>('.tl-shape[data-shape-id], [data-shape-id^="shape:"]'))
+			.map((element) => element.getAttribute('data-shape-id') || '')
+			.filter(Boolean);
+		if (visibleShapeIds.length > 0) {
+			const counts = new Map<string, number>();
+			for (const shapeId of visibleShapeIds) {
+				const node = model.nodes.get(shapeId);
+				if (node?.pageId) {
+					counts.set(node.pageId, (counts.get(node.pageId) || 0) + 1);
+					continue;
+				}
+				const textShape = model.textShapes.find((entry) => entry.shapeId === shapeId);
+				if (textShape?.pageId) {
+					counts.set(textShape.pageId, (counts.get(textShape.pageId) || 0) + 1);
+				}
+			}
+			const ranked = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+			if (ranked[0]?.[0]) {
+				return ranked[0][0];
+			}
+		}
+		if (model.currentPageId) return model.currentPageId;
+		return model.pageNames.keys().next().value || null;
+	}
+
+	private discourseCanvasClientToPagePoint(
+		root: HTMLElement,
+		model: DiscourseCanvasModel,
+		pageId: string,
+		clientX: number,
+		clientY: number
+	): { x: number; y: number } | null {
+		const viewport = this.getDiscourseCanvasViewport(root);
+		const rect = viewport.getBoundingClientRect();
+		if (!rect.width || !rect.height) return null;
+		const camera = model.cameras.get(pageId) || { pageId, x: 0, y: 0, z: 1 };
+		const z = camera.z && camera.z > 0 ? camera.z : 1;
+		return {
+			x: (clientX - rect.left) / z + camera.x,
+			y: (clientY - rect.top) / z + camera.y,
+		};
+	}
+
+	private getRenderedDiscourseShapeElement(root: HTMLElement, shapeId: string): HTMLElement | null {
+		const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(shapeId) : shapeId.replace(/"/g, '\\"');
+		return root.querySelector<HTMLElement>(`.tl-shape[data-shape-id="${escaped}"], [data-shape-id="${escaped}"]`);
+	}
+
+	private hitTestDiscourseNode(
+		model: DiscourseCanvasModel,
+		pageId: string,
+		pageX: number,
+		pageY: number
+	): DiscourseCanvasNodeEntry | null {
+		const candidates = Array.from(model.nodes.values())
+			.filter((entry) => entry.pageId === pageId && entry.citekey)
+			.filter((entry) => pageX >= entry.x && pageX <= entry.x + entry.w && pageY >= entry.y && pageY <= entry.y + entry.h)
+			.sort((a, b) => (a.w * a.h) - (b.w * b.h));
+		return candidates[0] || null;
+	}
+
+	private hitTestDiscourseTextShape(
+		model: DiscourseCanvasModel,
+		pageId: string,
+		pageX: number,
+		pageY: number
+	): DiscourseCanvasTextEntry | null {
+		const margin = 6;
+		const candidates = model.textShapes
+			.filter((entry) => entry.pageId === pageId && entry.primaryCitekey)
+			.filter((entry) => pageX >= entry.x - margin && pageX <= entry.x + entry.w + margin && pageY >= entry.y - margin && pageY <= entry.y + entry.h + margin)
+			.sort((a, b) => (a.w * a.h) - (b.w * b.h));
+		return candidates[0] || null;
+	}
+
+	private async getDiscourseCanvasGeometryHit(
+		file: TFile,
+		root: HTMLElement,
+		clientX: number,
+		clientY: number
+	): Promise<{ citekey: string; element: HTMLElement | null; kind: 'node' | 'text' } | null> {
+		const model = await this.getDiscourseCanvasModel(file);
+		return this.getDiscourseCanvasGeometryHitFromModel(root, model, clientX, clientY);
+	}
+
+	private getCachedDiscourseCanvasGeometryHit(
+		filePath: string,
+		root: HTMLElement,
+		clientX: number,
+		clientY: number
+	): { citekey: string; element: HTMLElement | null; kind: 'node' | 'text' } | null {
+		const model = this.getCachedDiscourseCanvasModel(filePath);
+		if (!model) return null;
+		return this.getDiscourseCanvasGeometryHitFromModel(root, model, clientX, clientY);
+	}
+
+	private getDiscourseRenderedShapeRectHit(
+		root: HTMLElement,
+		model: DiscourseCanvasModel,
+		pageId: string,
+		clientX: number,
+		clientY: number
+	): { citekey: string; element: HTMLElement | null; kind: 'node' | 'text' } | null {
+		const hits: Array<{ citekey: string; element: HTMLElement; kind: 'node' | 'text'; area: number; distance: number; containsPoint: boolean }> = [];
+
+		for (const entry of model.nodes.values()) {
+			if (entry.pageId !== pageId || !entry.citekey) continue;
+			const element = this.getRenderedDiscourseShapeElement(root, entry.shapeId);
+			if (!(element instanceof HTMLElement)) continue;
+			const rect = element.getBoundingClientRect();
+			const containsPoint = this.pointInRect(clientX, clientY, rect);
+			const margin = 10;
+			const near =
+				clientX >= rect.left - margin &&
+				clientX <= rect.right + margin &&
+				clientY >= rect.top - margin &&
+				clientY <= rect.bottom + margin;
+			if (!containsPoint && !near) continue;
+			const cx = rect.left + rect.width / 2;
+			const cy = rect.top + rect.height / 2;
+			hits.push({
+				citekey: entry.citekey,
+				element,
+				kind: 'node',
+				area: Math.max(1, rect.width * rect.height),
+				distance: Math.hypot(clientX - cx, clientY - cy),
+				containsPoint,
+			});
+		}
+
+		for (const entry of model.textShapes) {
+			if (entry.pageId !== pageId || !entry.primaryCitekey) continue;
+			const element = this.getRenderedDiscourseShapeElement(root, entry.shapeId);
+			if (!(element instanceof HTMLElement)) continue;
+			const rect = element.getBoundingClientRect();
+			const containsPoint = this.pointInRect(clientX, clientY, rect);
+			const margin = 8;
+			const near =
+				clientX >= rect.left - margin &&
+				clientX <= rect.right + margin &&
+				clientY >= rect.top - margin &&
+				clientY <= rect.bottom + margin;
+			if (!containsPoint && !near) continue;
+			const cx = rect.left + rect.width / 2;
+			const cy = rect.top + rect.height / 2;
+			hits.push({
+				citekey: entry.primaryCitekey,
+				element,
+				kind: 'text',
+				area: Math.max(1, rect.width * rect.height),
+				distance: Math.hypot(clientX - cx, clientY - cy),
+				containsPoint,
+			});
+		}
+
+		if (hits.length === 0) return null;
+		hits.sort((a, b) => {
+			if (a.containsPoint !== b.containsPoint) return a.containsPoint ? -1 : 1;
+			if (a.kind !== b.kind) return a.kind === 'node' ? -1 : 1;
+			return a.distance - b.distance || a.area - b.area;
+		});
+		const winner = hits[0];
+		return { citekey: winner.citekey, element: winner.element, kind: winner.kind };
+	}
+
+	private getDiscourseCanvasGeometryHitFromModel(
+		root: HTMLElement,
+		model: DiscourseCanvasModel,
+		clientX: number,
+		clientY: number
+	): { citekey: string; element: HTMLElement | null; kind: 'node' | 'text' } | null {
+		const pageId = this.getDiscourseCanvasActivePageId(root, model);
+		if (!pageId) return null;
+
+		const renderedHit = this.getDiscourseRenderedShapeRectHit(root, model, pageId, clientX, clientY);
+		if (renderedHit) return renderedHit;
+
+		const point = this.discourseCanvasClientToPagePoint(root, model, pageId, clientX, clientY);
+		if (!point) return null;
+
+		const nodeHit = this.hitTestDiscourseNode(model, pageId, point.x, point.y);
+		if (nodeHit?.citekey) {
+			return {
+				citekey: nodeHit.citekey,
+				element: this.getRenderedDiscourseShapeElement(root, nodeHit.shapeId),
+				kind: 'node',
+			};
+		}
+
+		const textHit = this.hitTestDiscourseTextShape(model, pageId, point.x, point.y);
+		if (textHit?.primaryCitekey) {
+			return {
+				citekey: textHit.primaryCitekey,
+				element: this.getRenderedDiscourseShapeElement(root, textHit.shapeId),
+				kind: 'text',
+			};
+		}
+
+		return null;
+	}
+
+	private getDiscourseCanvasShapeIdFromEvent(event: MouseEvent, root: HTMLElement): string | null {
+		const collectShapeId = (element: HTMLElement | null): string | null => {
+			if (!(element instanceof HTMLElement)) return null;
+			const shape = element.closest<HTMLElement>('.tl-shape[data-shape-id], [data-shape-id^="shape:"]');
+			if (!(shape instanceof HTMLElement)) return null;
+			if (!root.contains(shape)) return null;
+			return shape.getAttribute('data-shape-id') || null;
+		};
+
+		const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+		for (const node of path) {
+			if (!(node instanceof HTMLElement)) continue;
+			const shapeId = collectShapeId(node);
+			if (shapeId) return shapeId;
+		}
+
+		const stack = typeof document.elementsFromPoint === 'function'
+			? document.elementsFromPoint(event.clientX, event.clientY)
+			: [document.elementFromPoint(event.clientX, event.clientY)].filter(Boolean) as Element[];
+		for (const candidate of stack) {
+			if (!(candidate instanceof HTMLElement)) continue;
+			const shapeId = collectShapeId(candidate);
+			if (shapeId) return shapeId;
+		}
+
+		return null;
+	}
+
+	private getDiscourseCanvasShapeIdByHitTest(
+		root: HTMLElement,
+		nodeMap: Map<string, DiscourseCanvasNodeEntry>,
+		clientX: number,
+		clientY: number
+	): string | null {
+		const candidates = Array.from(root.querySelectorAll<HTMLElement>('.tl-shape[data-shape-id], [data-shape-id^="shape:"]'))
+			.map((element) => {
+				const shapeId = element.getAttribute('data-shape-id') || '';
+				if (!shapeId || !nodeMap.has(shapeId)) return null;
+				const rect = element.getBoundingClientRect();
+				if (!this.pointInRect(clientX, clientY, rect)) return null;
+				const area = Math.max(1, rect.width * rect.height);
+				const cx = rect.left + rect.width / 2;
+				const cy = rect.top + rect.height / 2;
+				return {
+					shapeId,
+					area,
+					distance: Math.hypot(clientX - cx, clientY - cy),
+				};
+			})
+			.filter((entry): entry is { shapeId: string; area: number; distance: number } => !!entry);
+		candidates.sort((a, b) => a.area - b.area || a.distance - b.distance);
+		return candidates[0]?.shapeId || null;
+	}
+
+	private findVisibleCitationGeometryHit(root: HTMLElement, clientX: number, clientY: number): string | null {
+		const candidates = Array.from(root.querySelectorAll<HTMLElement>('*'))
+			.map((element) => {
+				if (this.isIgnoredBaseHoverElement(element)) return null;
+				const citekey = this.extractStandaloneCitationFromElement(element)?.replace(/^@+/, '').trim() || '';
+				if (!citekey) return null;
+				const rect = element.getBoundingClientRect();
+				if (rect.width < 6 || rect.height < 6) return null;
+				const margin = 36;
+				const near =
+					clientX >= rect.left - margin &&
+					clientX <= rect.right + margin &&
+					clientY >= rect.top - margin &&
+					clientY <= rect.bottom + margin;
+				if (!near) return null;
+				const cx = rect.left + rect.width / 2;
+				const cy = rect.top + rect.height / 2;
+				const containsPoint = this.pointInRect(clientX, clientY, rect);
+				return {
+					citekey,
+					containsPoint,
+					area: Math.max(1, rect.width * rect.height),
+					distance: Math.hypot(clientX - cx, clientY - cy),
+				};
+			})
+			.filter((entry): entry is { citekey: string; containsPoint: boolean; area: number; distance: number } => !!entry);
+		if (candidates.length === 0) return null;
+		candidates.sort((a, b) => {
+			if (a.containsPoint !== b.containsPoint) return a.containsPoint ? -1 : 1;
+			return a.distance - b.distance || a.area - b.area;
+		});
+		return candidates[0]?.citekey || null;
+	}
+
+	private async resolveDiscourseCanvasClickedCitekey(file: TFile, event: MouseEvent, root: HTMLElement): Promise<string | null> {
+		const geometryHit = await this.getDiscourseCanvasGeometryHit(file, root, event.clientX, event.clientY);
+		if (geometryHit?.citekey) {
+			const normalized = geometryHit.citekey.replace(/^@+/, '').trim() || null;
+			this.discourseDebug('click-hit-geometry', {
+				filePath: file.path,
+				clientX: event.clientX,
+				clientY: event.clientY,
+				kind: geometryHit.kind,
+				citekey: normalized,
+			});
+			return normalized;
+		}
+		const nodeMap = await this.getDiscourseCanvasNodeMap(file);
+		let shapeId = this.getDiscourseCanvasShapeIdFromEvent(event, root);
+		if (!shapeId || !nodeMap.has(shapeId)) {
+			shapeId = this.getDiscourseCanvasShapeIdByHitTest(root, nodeMap, event.clientX, event.clientY);
+		}
+		if (shapeId) {
+			const entry = nodeMap.get(shapeId);
+			const citekey = entry?.citekey?.replace(/^@+/, '').trim() || '';
+			if (citekey) {
+				this.discourseDebug('click-hit-shape', {
+					filePath: file.path,
+					clientX: event.clientX,
+					clientY: event.clientY,
+					shapeId,
+					citekey,
+				});
+				return citekey;
+			}
+		}
+		const fallback = this.findVisibleCitationGeometryHit(root, event.clientX, event.clientY);
+		this.discourseDebug('click-hit-fallback', {
+			filePath: file.path,
+			clientX: event.clientX,
+			clientY: event.clientY,
+			citekey: fallback,
+		});
+		return fallback;
+	}
+
+	private async handleDiscourseCanvasRootClick(
+		event: MouseEvent,
+		leaf: WorkspaceLeaf | null,
+		file: TFile,
+		root: HTMLElement
+	) {
+		if (!this.settings.enableDiscourseGraphsCompatibility) return;
+		const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+		const target = path.find((node): node is HTMLElement => node instanceof HTMLElement)
+			|| (event.target instanceof HTMLElement ? event.target : null);
+		this.discourseDebug('root-click-received', {
+			filePath: file.path,
+			clientX: event.clientX,
+			clientY: event.clientY,
+			target: this.summarizeDiscourseTarget(target),
+		});
+		if (!(target instanceof HTMLElement)) return;
+		if (this._baseHoverCardEl?.contains(target)) return;
+		if (!root.contains(target) && !path.includes(root)) return;
+		if (this.isIgnoredBaseHoverElement(target)) return;
+
+		const filePath = file.path;
+		this.hideBaseHoverCard();
+		this._suppressBaseHoverUntil = Date.now() + 450;
+
+		const clickedFocused = await this.resolveDiscourseCanvasClickedCitekey(file, event, root);
+		this._lastCanvasClickContext = {
+			filePath,
+			x: event.clientX,
+			y: event.clientY,
+			at: Date.now(),
+			candidate: clickedFocused,
+		};
+		this.discourseDebug('root-click-resolved', {
+			filePath,
+			candidate: clickedFocused,
+		});
+		this.scheduleDiscourseSelectionSync(leaf, filePath, 80);
 	}
 
 	private hideBaseHoverCard() {
@@ -758,6 +3300,7 @@ export default class ZotsidianPlugin extends Plugin {
 			this._baseHoverCardEl = null;
 		}
 		this._baseHoverTargetEl = null;
+		this._baseHoverRootEl = null;
 	}
 
 	private scheduleHideBaseHoverCard() {
@@ -770,37 +3313,418 @@ export default class ZotsidianPlugin extends Plugin {
 		}, 90);
 	}
 
-	private extractStandaloneCitationFromElement(element: HTMLElement): string | null {
-		const text = (element.innerText || element.textContent || '').trim();
-		if (!text || text.length > 140) return null;
-		const mentions = citationsInText(text);
-		if (mentions.length !== 1) return null;
-		const citekey = mentions[0];
-		const acceptable = new RegExp(`^(?:\\[@${citekey.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\]|@${citekey.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}|\\[\\[@${citekey.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\]\\])$`, 'i');
-		return acceptable.test(text) ? citekey : null;
+	private normalizeHoverText(value: string): string {
+		return value
+			.replace(/\u200b/g, '')
+			.replace(/\s+/g, ' ')
+			.trim();
 	}
 
-	private findBaseHoverTarget(start: HTMLElement, root: HTMLElement): { element: HTMLElement; citekey: string } | null {
-		let current: HTMLElement | null = start;
-		while (current) {
-			if (current === root.parentElement) break;
-			if (current.classList.contains('zotsidian-base-hover-card')) return null;
-			const citekey = this.extractStandaloneCitationFromElement(current);
-			if (citekey) return { element: current, citekey };
-			if (current === root) break;
-			current = current.parentElement;
+	private isIgnoredBaseHoverElement(element: HTMLElement): boolean {
+		const ignoredAncestor = element.closest([
+			'.zotsidian-base-hover-card',
+			'.canvas-controls',
+			'.canvas-control-item',
+			'.canvas-node-menu',
+			'.canvas-card-menu',
+			'.canvas-zoom-actions',
+			'.view-header',
+			'.workspace-tab-header',
+			'.menu',
+			'.tooltip',
+			'.popover'
+		].join(', '));
+		if (ignoredAncestor) return true;
+
+		const controlCandidate = element.closest('button, [title], [aria-label], .clickable-icon');
+		if (!(controlCandidate instanceof HTMLElement)) return false;
+		const marker = [
+			controlCandidate.getAttribute('aria-label') || '',
+			controlCandidate.getAttribute('title') || '',
+			controlCandidate.innerText || '',
+			controlCandidate.className || '',
+		].join(' ').toLowerCase();
+		return /(zoom|selection|delete|duplicate|settings|palette|color|undo|redo|reset|fit view|help|toolbar|control)/.test(marker);
+	}
+
+	private extractStandaloneCitationFromElement(element: HTMLElement): string | null {
+		const candidates = [
+			element.getAttribute('data-citekey') || '',
+			element.getAttribute('aria-label') || '',
+			element.getAttribute('title') || '',
+			element.innerText || element.textContent || '',
+		];
+		for (const candidate of candidates) {
+			const text = this.normalizeHoverText(candidate);
+			if (!text || text.length > 140) continue;
+			const mentions = citationsInText(text);
+			if (mentions.length !== 1) continue;
+			const citekey = mentions[0];
+			const escaped = citekey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+			const normalizedCompact = text.replace(/\s+/g, '');
+			const exactForms = [
+				new RegExp(`^\\[@${escaped}\\]$`, 'i'),
+				new RegExp(`^@${escaped}$`, 'i'),
+				new RegExp(`^\\[\\[@${escaped}\\]\\]$`, 'i'),
+			];
+			if (exactForms.some((pattern) => pattern.test(normalizedCompact))) {
+				return citekey;
+			}
+			if (normalizedCompact.includes(`@${citekey}`) && normalizedCompact.length <= (`@${citekey}`.length + 18)) {
+				return citekey;
+			}
 		}
 		return null;
 	}
 
-	private positionBaseHoverCard(card: HTMLElement, target: HTMLElement) {
+	private extractStandaloneWikiLinkFromElement(element: HTMLElement): string | null {
+		const candidates = [
+			element.getAttribute('data-href') || '',
+			element.getAttribute('aria-label') || '',
+			element.getAttribute('title') || '',
+			element.innerText || element.textContent || '',
+		];
+		for (const candidate of candidates) {
+			const text = this.normalizeHoverText(candidate);
+			if (!text || text.length > 220) continue;
+			const mentions = this.extractMarkdownWikiLinkMentions(text);
+			if (mentions.length !== 1) continue;
+			const mention = mentions[0];
+			const normalized = text.replace(/\s+/g, '');
+			const exact = `[[${mention.rawLink.replace(/\s+/g, '')}]]`;
+			if (normalized === exact || normalized.includes(exact)) {
+				return mention.rawLink;
+			}
+		}
+		return null;
+	}
+
+	private resolveDiscourseNodeIdFromElement(element: HTMLElement, sourcePath: string): string | null {
+		const directHref = element.getAttribute('data-href')
+			|| element.closest<HTMLElement>('[data-href], a.internal-link')?.getAttribute('data-href')
+			|| '';
+		const rawLink = directHref || this.extractStandaloneWikiLinkFromElement(element) || '';
+		if (!rawLink) return null;
+		const linkedFile = this.resolveWikiLinkToFile(rawLink, sourcePath);
+		const nodeTypeId = this.getDiscourseNodeTypeIdForFile(linkedFile);
+		if (!linkedFile || !nodeTypeId || !this.shouldShowDiscourseNodeType(nodeTypeId)) return null;
+		return linkedFile.path;
+	}
+
+	private findStandaloneCitationInNearbySubtree(
+		element: HTMLElement,
+		maxDepth: number = 3,
+		maxNodes: number = 18
+	): { element: HTMLElement; citekey: string } | null {
+		const queue: Array<{ element: HTMLElement; depth: number }> = [{ element, depth: 0 }];
+		let inspected = 0;
+
+		while (queue.length > 0 && inspected < maxNodes) {
+			const current = queue.shift();
+			if (!current) break;
+			const { element: candidate, depth } = current;
+			if (candidate !== element) {
+				inspected += 1;
+				if (!this.isIgnoredBaseHoverElement(candidate)) {
+					const citekey = this.extractStandaloneCitationFromElement(candidate);
+					if (citekey) {
+						return { element: candidate, citekey };
+					}
+				}
+			}
+			if (depth >= maxDepth) continue;
+			for (const child of Array.from(candidate.children)) {
+				if (!(child instanceof HTMLElement)) continue;
+				queue.push({ element: child, depth: depth + 1 });
+				if (queue.length >= maxNodes * 2) break;
+			}
+		}
+
+		return null;
+	}
+
+	private findBaseHoverTarget(start: HTMLElement, root: HTMLElement): { element: HTMLElement; citekey: string } | null {
+		let current: HTMLElement | null = start;
+		let depth = 0;
+		while (current) {
+			if (current === root.parentElement) break;
+			if (this.isIgnoredBaseHoverElement(current)) return null;
+			const citekey = this.extractStandaloneCitationFromElement(current);
+			if (citekey) return { element: current, citekey };
+			if (depth < 3 && current !== root) {
+				const subtreeMatch = this.findStandaloneCitationInNearbySubtree(current);
+				if (subtreeMatch) return subtreeMatch;
+			}
+			if (current === root) break;
+			current = current.parentElement;
+			depth += 1;
+		}
+		return null;
+	}
+
+	private findBaseHoverTargetFromPoint(clientX: number, clientY: number, root: HTMLElement): { element: HTMLElement; citekey: string } | null {
+		const stack = typeof document.elementsFromPoint === 'function'
+			? document.elementsFromPoint(clientX, clientY)
+			: [document.elementFromPoint(clientX, clientY)].filter(Boolean) as Element[];
+		for (const candidate of stack) {
+			if (!(candidate instanceof HTMLElement)) continue;
+			if (!root.contains(candidate)) continue;
+			if (this.isIgnoredBaseHoverElement(candidate)) continue;
+			const target = this.findBaseHoverTarget(candidate, root);
+			if (target) return target;
+		}
+		return null;
+	}
+
+	private getBaseLocateCandidateElements(root: HTMLElement, file: TFile): HTMLElement[] {
+		if (file.extension === 'canvas') {
+			const nodes = Array.from(root.querySelectorAll<HTMLElement>('[data-node-id], .canvas-node'));
+			if (nodes.length > 0) return nodes;
+		}
+		const cellCandidates = Array.from(root.querySelectorAll<HTMLElement>('[role="gridcell"], td, .table-cell-wrapper, .table-cell, .view-content a, .internal-link'));
+		return cellCandidates.length > 0 ? cellCandidates : Array.from(root.querySelectorAll<HTMLElement>('*'));
+	}
+
+	private getBaseSelectionElements(root: HTMLElement): HTMLElement[] {
+		const selected = new Set<HTMLElement>();
+		const active = document.activeElement;
+		if (active instanceof HTMLElement && root.contains(active)) {
+			const owner = active.closest<HTMLElement>('[role="gridcell"], td, .table-cell-wrapper, .table-cell, [data-node-id], .canvas-node');
+			if (owner) selected.add(owner);
+		}
+		for (const element of Array.from(root.querySelectorAll<HTMLElement>('[aria-selected="true"], .is-selected, .selected, .mod-selected, .is-focused, .canvas-node.is-focused, .canvas-node.mod-selected'))) {
+			selected.add(element);
+		}
+		return Array.from(selected);
+	}
+
+	private getBaseSelectedCitekeys(root: HTMLElement): string[] {
+		const citekeys: string[] = [];
+		for (const element of this.getBaseSelectionElements(root)) {
+			const exact = this.extractStandaloneCitationFromElement(element);
+			const nearby = exact ? null : this.findStandaloneCitationInNearbySubtree(element, 5, 28);
+			const citekey = (exact || nearby?.citekey || '').replace(/^@+/, '').trim();
+			if (citekey) citekeys.push(citekey);
+		}
+		return this.normalizeSidebarSelectedCitekeys(citekeys);
+	}
+
+	private getBaseSelectedDiscourseNodeIds(root: HTMLElement, file: TFile): string[] {
+		const nodeIds: string[] = [];
+		for (const element of this.getBaseSelectionElements(root)) {
+			const nodeId = this.resolveDiscourseNodeIdFromElement(element, file.path);
+			if (nodeId) nodeIds.push(nodeId);
+		}
+		return Array.from(new Set(nodeIds));
+	}
+
+	private findDiscourseSourceNodeCitekeyFromPoint(clientX: number, clientY: number, root: HTMLElement): string | null {
+		const hoverTarget = this.findBaseHoverTargetFromPoint(clientX, clientY, root);
+		if (!hoverTarget) return null;
+		const citekey = hoverTarget.citekey.replace(/^@+/, '').trim();
+		if (!citekey) return null;
+		if (!this.findSourceNoteFile(citekey)) return null;
+		return citekey;
+	}
+
+	private findDiscourseSourceNodeCitekeyFromEventPath(path: EventTarget[], root: HTMLElement): string | null {
+		for (const node of path) {
+			if (!(node instanceof HTMLElement)) continue;
+			if (!root.contains(node)) continue;
+			const direct = this.extractStandaloneCitationFromElement(node);
+			if (direct && this.findSourceNoteFile(direct.replace(/^@+/, '').trim())) {
+				return direct.replace(/^@+/, '').trim();
+			}
+			const nearby = this.findStandaloneCitationInNearbySubtree(node, 8, 120);
+			if (nearby?.citekey && this.findSourceNoteFile(nearby.citekey.replace(/^@+/, '').trim())) {
+				return nearby.citekey.replace(/^@+/, '').trim();
+			}
+		}
+		return null;
+	}
+
+	private pointInRect(x: number, y: number, rect: DOMRect): boolean {
+		return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+	}
+
+	private findSelectedDiscourseSourceNodeCitekey(root: HTMLElement, clientX: number, clientY: number): string | null {
+		const selectors = [
+			'[aria-selected="true"]',
+			'.is-selected',
+			'.selected',
+			'.mod-selected',
+			'.canvas-node.is-focused',
+			'.canvas-node.is-selected',
+			'.canvas-node.mod-selected',
+		];
+		const candidates = Array.from(root.querySelectorAll<HTMLElement>(selectors.join(', ')));
+		if (candidates.length === 0) return null;
+		const ranked = candidates
+			.map((element) => {
+				const exact = this.extractStandaloneCitationFromElement(element);
+				const nearby = exact ? null : this.findStandaloneCitationInNearbySubtree(element, 8, 120);
+				const citekey = (exact || nearby?.citekey || '').replace(/^@+/, '').trim();
+				if (!citekey || !this.findSourceNoteFile(citekey)) return null;
+				const rect = element.getBoundingClientRect();
+				const cx = rect.left + rect.width / 2;
+				const cy = rect.top + rect.height / 2;
+				const distance = Math.hypot(clientX - cx, clientY - cy);
+				return { citekey, distance, containsPoint: this.pointInRect(clientX, clientY, rect) };
+			})
+			.filter((entry): entry is { citekey: string; distance: number; containsPoint: boolean } => !!entry);
+		const containsPoint = ranked.filter((entry) => entry.containsPoint);
+		const pool = containsPoint.length > 0 ? containsPoint : ranked;
+		pool.sort((a, b) => a.distance - b.distance);
+		return pool[0]?.citekey || null;
+	}
+
+	private getSelectedDiscourseSourceNodeCandidates(root: HTMLElement): Array<{ citekey: string; rect: DOMRect }> {
+		const selectors = [
+			'[aria-selected="true"]',
+			'.is-selected',
+			'.selected',
+			'.mod-selected',
+			'.canvas-node.is-focused',
+			'.canvas-node.is-selected',
+			'.canvas-node.mod-selected',
+		];
+		return Array.from(root.querySelectorAll<HTMLElement>(selectors.join(', ')))
+			.map((element) => {
+				const exact = this.extractStandaloneCitationFromElement(element);
+				const nearby = exact ? null : this.findStandaloneCitationInNearbySubtree(element, 8, 120);
+				const citekey = (exact || nearby?.citekey || '').replace(/^@+/, '').trim();
+				if (!citekey || !this.findSourceNoteFile(citekey)) return null;
+				return { citekey, rect: element.getBoundingClientRect() };
+			})
+			.filter((entry): entry is { citekey: string; rect: DOMRect } => !!entry);
+	}
+
+	private getDiscourseSelectionForegroundRect(root: HTMLElement): DOMRect | null {
+		const selection = root.querySelector<SVGElement | HTMLElement>('.tl-selection__fg, [data-testid="selection-foreground"]');
+		if (!(selection instanceof SVGElement || selection instanceof HTMLElement)) return null;
+		const rect = selection.getBoundingClientRect();
+		if (rect.width <= 0 || rect.height <= 0) return null;
+		return rect;
+	}
+
+	private getRectIntersectionArea(a: DOMRect, b: DOMRect): number {
+		const left = Math.max(a.left, b.left);
+		const right = Math.min(a.right, b.right);
+		const top = Math.max(a.top, b.top);
+		const bottom = Math.min(a.bottom, b.bottom);
+		return Math.max(0, right - left) * Math.max(0, bottom - top);
+	}
+
+	private resolveSelectedDiscourseSourceNodeFromSelectionBox(root: HTMLElement, filePath: string): string | null {
+		const model = this.getCachedDiscourseCanvasModel(filePath);
+		if (!model) return null;
+		const pageId = this.getDiscourseCanvasActivePageId(root, model);
+		if (!pageId) return null;
+		const selectionRect = this.getDiscourseSelectionForegroundRect(root);
+		if (!selectionRect) return null;
+
+		const hits = Array.from(model.nodes.values())
+			.filter((entry) => entry.pageId === pageId && !!entry.citekey)
+			.map((entry) => {
+				const element = this.getRenderedDiscourseShapeElement(root, entry.shapeId);
+				if (!(element instanceof HTMLElement)) return null;
+				const rect = element.getBoundingClientRect();
+				if (rect.width <= 0 || rect.height <= 0) return null;
+				const intersection = this.getRectIntersectionArea(selectionRect, rect);
+				if (intersection <= 0) return null;
+				const selectionCx = selectionRect.left + selectionRect.width / 2;
+				const selectionCy = selectionRect.top + selectionRect.height / 2;
+				const rectCx = rect.left + rect.width / 2;
+				const rectCy = rect.top + rect.height / 2;
+				return {
+					citekey: entry.citekey!,
+					intersection,
+					distance: Math.hypot(selectionCx - rectCx, selectionCy - rectCy),
+					areaDelta: Math.abs(selectionRect.width * selectionRect.height - rect.width * rect.height),
+				};
+			})
+			.filter((entry): entry is { citekey: string; intersection: number; distance: number; areaDelta: number } => !!entry);
+
+		if (hits.length === 0) return null;
+		hits.sort((a, b) => {
+			if (a.intersection !== b.intersection) return b.intersection - a.intersection;
+			if (a.distance !== b.distance) return a.distance - b.distance;
+			return a.areaDelta - b.areaDelta;
+		});
+		return hits[0]?.citekey || null;
+	}
+
+	private resolveSelectedDiscourseSourceNodeCitekey(root: HTMLElement, filePath: string): string | null {
+		const activeLeaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
+		return this.resolveSelectedDiscourseSourceNodeCitekeyForLeaf(root, filePath, activeLeaf);
+	}
+
+	private resolveSelectedDiscourseSourceNodeCitekeyForLeaf(
+		root: HTMLElement,
+		filePath: string,
+		leaf: WorkspaceLeaf | null,
+	): string | null {
+		const byStore = this.resolveSelectedDiscourseSourceNodeFromStore(leaf, filePath);
+		if (byStore) return byStore;
+		const bySelectionBox = this.resolveSelectedDiscourseSourceNodeFromSelectionBox(root, filePath);
+		if (bySelectionBox) return bySelectionBox;
+		const candidates = this.getSelectedDiscourseSourceNodeCandidates(root);
+		if (candidates.length === 0) return null;
+		return candidates[0]?.citekey || null;
+	}
+
+	private resolveSelectedDiscourseContextForLeaf(
+		root: HTMLElement,
+		filePath: string,
+		leaf: WorkspaceLeaf | null,
+	): Omit<SidebarSelectedContext, 'filePath'> | null {
+		const byStore = this.resolveSelectedDiscourseContextFromStore(leaf, filePath);
+		if (byStore) return byStore;
+		const bySelectionBox = this.resolveSelectedDiscourseSourceNodeFromSelectionBox(root, filePath);
+		if (bySelectionBox) {
+			return {
+				kind: 'node',
+				citekeys: [bySelectionBox],
+				source: 'canvas-selection',
+			};
+		}
+		const candidates = this.getSelectedDiscourseSourceNodeCandidates(root);
+		if (candidates.length === 0) return null;
+		return {
+			kind: 'node',
+			citekeys: [candidates[0].citekey],
+			source: 'canvas-selection',
+		};
+	}
+
+	private isSourceNodeLikeHoverTarget(target: { element: HTMLElement; citekey: string } | null): boolean {
+		if (!target) return false;
+		if (!this.findSourceNoteFile(target.citekey)) return false;
+		const leaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
+		if (!this.isDiscourseCanvasLeaf(leaf)) return false;
+		const file = this.getLeafFile(leaf) ?? this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile)) return false;
+		const discourseShape = target.element.closest<HTMLElement>('.tl-shape[data-shape-id], [data-shape-id^="shape:"]');
+		const shapeId = discourseShape?.getAttribute('data-shape-id') || '';
+		if (!shapeId) return false;
+		const nodeMap = this.getCachedDiscourseCanvasNodeMap(file.path);
+		return !!nodeMap?.has(shapeId);
+	}
+
+	private positionBaseHoverCard(card: HTMLElement, target: HTMLElement, root: HTMLElement) {
 		const rect = target.getBoundingClientRect();
 		const cardRect = card.getBoundingClientRect();
-		const viewportWidth = window.innerWidth;
-		const viewportHeight = window.innerHeight;
+		const hoverFrame = (root.closest('.workspace-leaf-content') as HTMLElement | null) || root;
+		const frameRect = hoverFrame.getBoundingClientRect();
+		const viewportWidth = frameRect.width;
+		const viewportHeight = frameRect.height;
 		const gap = 8;
-		const fitsRight = rect.right + gap + cardRect.width <= viewportWidth - 12;
-		const fitsLeft = rect.left - gap - cardRect.width >= 12;
+		const minLeft = frameRect.left + 12;
+		const maxRight = frameRect.right - 12;
+		const minTop = frameRect.top + 12;
+		const maxBottom = frameRect.bottom - 12;
+		const fitsRight = rect.right + gap + cardRect.width <= maxRight;
+		const fitsLeft = rect.left - gap - cardRect.width >= minLeft;
 		let left = rect.left;
 		let top = rect.bottom + 2;
 		if (fitsRight) {
@@ -810,21 +3734,21 @@ export default class ZotsidianPlugin extends Plugin {
 			left = rect.left - cardRect.width - gap;
 			top = rect.top;
 		} else {
-			if (left + cardRect.width > viewportWidth - 12) {
-				left = Math.max(12, viewportWidth - cardRect.width - 12);
+			if (left + cardRect.width > maxRight) {
+				left = Math.max(minLeft, maxRight - cardRect.width);
 			}
-			if (top + cardRect.height > viewportHeight - 12) {
-				top = Math.max(12, rect.top - cardRect.height - 2);
+			if (top + cardRect.height > maxBottom) {
+				top = Math.max(minTop, rect.top - cardRect.height - 2);
 			}
 		}
-		if (top + cardRect.height > viewportHeight - 12) {
-			top = Math.max(12, viewportHeight - cardRect.height - 12);
+		if (top + cardRect.height > maxBottom) {
+			top = Math.max(minTop, maxBottom - cardRect.height);
 		}
 		card.style.left = `${Math.round(left)}px`;
 		card.style.top = `${Math.round(top)}px`;
 	}
 
-	private showBaseHoverCard(target: HTMLElement, citekey: string) {
+	private showBaseHoverCard(target: HTMLElement, citekey: string, root: HTMLElement) {
 		if (!this.settings.showCitationHoverCard) {
 			this.hideBaseHoverCard();
 			return;
@@ -834,8 +3758,8 @@ export default class ZotsidianPlugin extends Plugin {
 			window.clearTimeout(this._baseHoverHideTimer);
 			this._baseHoverHideTimer = null;
 		}
-		if (this._baseHoverTargetEl === target && this._baseHoverCardEl?.isConnected) {
-			this.positionBaseHoverCard(this._baseHoverCardEl, target);
+		if (this._baseHoverTargetEl === target && this._baseHoverCardEl?.isConnected && this._baseHoverRootEl === root) {
+			this.positionBaseHoverCard(this._baseHoverCardEl, target, root);
 			return;
 		}
 		this.hideBaseHoverCard();
@@ -853,24 +3777,29 @@ export default class ZotsidianPlugin extends Plugin {
 		document.body.appendChild(card);
 		this._baseHoverCardEl = card;
 		this._baseHoverTargetEl = target;
-		this.positionBaseHoverCard(card, target);
+		this._baseHoverRootEl = root;
+		this.positionBaseHoverCard(card, target, root);
 		window.requestAnimationFrame(() => {
-			if (this._baseHoverCardEl === card && this._baseHoverTargetEl === target) {
-				this.positionBaseHoverCard(card, target);
+			if (this._baseHoverCardEl === card && this._baseHoverTargetEl === target && this._baseHoverRootEl === root) {
+				this.positionBaseHoverCard(card, target, root);
 			}
 		});
 	}
 
-	private scheduleSwitchBaseHoverCard(target: HTMLElement, citekey: string) {
+	private scheduleSwitchBaseHoverCard(target: HTMLElement, citekey: string, root: HTMLElement) {
 		this.clearBaseHoverSwitchTimer();
 		this._baseHoverSwitchTimer = window.setTimeout(() => {
 			this._baseHoverSwitchTimer = null;
-			this.showBaseHoverCard(target, citekey);
+			this.showBaseHoverCard(target, citekey, root);
 		}, 120);
 	}
 
 	private handleDocumentMouseOver(event: MouseEvent) {
 		if (!this.settings.showCitationHoverCard) {
+			this.hideBaseHoverCard();
+			return;
+		}
+		if (Date.now() < this._suppressBaseHoverUntil) {
 			this.hideBaseHoverCard();
 			return;
 		}
@@ -886,13 +3815,34 @@ export default class ZotsidianPlugin extends Plugin {
 		}
 		const leaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
 		const root = this.getBaseViewRoot(leaf);
+		const container = this.getBaseViewContainer(leaf);
+		const leafFile = this.getLeafFile(leaf) ?? this.app.workspace.getActiveFile();
+		if (leafFile instanceof TFile && leafFile.extension === 'canvas' && !this.isDiscourseCanvasLeaf(leaf)) {
+			this.hideBaseHoverCard();
+			return;
+		}
 		if (!(root instanceof HTMLElement)) {
 			this.hideBaseHoverCard();
 			return;
 		}
-		if (!root.contains(target)) return;
-		const hoverTarget = this.findBaseHoverTarget(target, root);
-		if (!hoverTarget) return;
+		if (!root.contains(target) && !(container instanceof HTMLElement && container.contains(target))) return;
+		if (this.isIgnoredBaseHoverElement(target)) {
+			this.scheduleHideBaseHoverCard();
+			return;
+		}
+		if (this.settings.enableDiscourseGraphsCompatibility && this.isDiscourseCanvasLeaf(leaf) && leafFile instanceof TFile) {
+			return;
+		}
+
+		const hoverTarget = this.findBaseHoverTargetFromPoint(event.clientX, event.clientY, root) || this.findBaseHoverTarget(target, root);
+		if (!hoverTarget) {
+			this.scheduleHideBaseHoverCard();
+			return;
+		}
+		if (this.settings.enableDiscourseGraphsCompatibility && this.isDiscourseCanvasLeaf(leaf) && this.isSourceNodeLikeHoverTarget(hoverTarget)) {
+			this.hideBaseHoverCard();
+			return;
+		}
 		if (this._baseHoverTargetEl === hoverTarget.element && this._baseHoverCardEl?.isConnected) {
 			if (this._baseHoverHideTimer != null) {
 				window.clearTimeout(this._baseHoverHideTimer);
@@ -902,10 +3852,10 @@ export default class ZotsidianPlugin extends Plugin {
 			return;
 		}
 		if (this._baseHoverCardEl?.isConnected && this._baseHoverTargetEl) {
-			this.scheduleSwitchBaseHoverCard(hoverTarget.element, hoverTarget.citekey);
+			this.scheduleSwitchBaseHoverCard(hoverTarget.element, hoverTarget.citekey, root);
 			return;
 		}
-		this.showBaseHoverCard(hoverTarget.element, hoverTarget.citekey);
+		this.showBaseHoverCard(hoverTarget.element, hoverTarget.citekey, root);
 	}
 
 	private handleDocumentMouseOut(event: MouseEvent) {
@@ -929,32 +3879,292 @@ export default class ZotsidianPlugin extends Plugin {
 	private syncActiveBaseViewSupport(leaf: WorkspaceLeaf | null) {
 		this.clearBaseViewObserver();
 		this.hideBaseHoverCard();
+		const container = this.getBaseViewContainer(leaf);
+		if (!(container instanceof HTMLElement)) return;
 		const root = this.getBaseViewRoot(leaf);
-		if (!(root instanceof HTMLElement)) return;
+		const file = this.getLeafFile(leaf) ?? this.app.workspace.getActiveFile();
+		if (file instanceof TFile && this.isDiscourseCanvasLeaf(leaf)) {
+			const cleanups: Array<() => void> = [];
+			void this.getDiscourseCanvasModel(file);
+			const discourseView = leaf?.view as { store?: { listen?: (cb: () => void) => () => void } } | undefined;
+			const store = discourseView?.store;
+			if (store && typeof store.listen === 'function') {
+				this.discourseDebug('attach-discourse-store-sync', {
+					filePath: file.path,
+				});
+				const unsubscribe = store.listen(() => {
+					this.scheduleDiscourseSelectionSync(leaf, file.path, 45);
+					this.scheduleDiscourseHoverSync(leaf, file.path, 0);
+				});
+				if (typeof unsubscribe === 'function') {
+					cleanups.push(unsubscribe);
+				}
+			}
+			this.startDiscourseStatePoll(leaf, file.path);
+
+			this._baseViewRootCleanup = () => {
+				for (const cleanup of cleanups) {
+					try {
+						cleanup();
+					} catch {
+						// Best effort cleanup only.
+					}
+				}
+			};
+			this.scheduleDiscourseSelectionSync(leaf, file.path, 0);
+		} else if (file instanceof TFile) {
+			const syncBaseSelection = (event?: Event) => {
+				const eventTarget = event?.target instanceof HTMLElement ? event.target : null;
+				void this.syncGenericBaseSelectionForLeaf(leaf, file, eventTarget);
+			};
+			container.addEventListener('click', syncBaseSelection, true);
+			container.addEventListener('keyup', syncBaseSelection, true);
+			container.addEventListener('focusin', syncBaseSelection, true);
+			this._baseViewRootCleanup = () => {
+				container.removeEventListener('click', syncBaseSelection, true);
+				container.removeEventListener('keyup', syncBaseSelection, true);
+				container.removeEventListener('focusin', syncBaseSelection, true);
+			};
+			syncBaseSelection();
+		}
 		this._baseViewObserver = new MutationObserver(() => {
 			this.hideBaseHoverCard();
 			this.scheduleBaseViewRefresh();
+			if (file instanceof TFile && this.isDiscourseCanvasLeaf(leaf)) {
+				this.scheduleDiscourseSelectionSync(leaf, file.path, 90);
+			} else if (file instanceof TFile) {
+				void this.syncGenericBaseSelectionForLeaf(leaf, file);
+			}
 		});
-		this._baseViewObserver.observe(root, {
+		this._baseViewObserver.observe(container, {
 			childList: true,
 			subtree: true,
 			characterData: true,
+			attributes: true,
 		});
 	}
 
-	private handleDocumentMouseDown(event: MouseEvent) {
-		const target = event.target;
-		if (!(target instanceof Node)) {
+	private getBaseInteractionOwner(target: HTMLElement | null, root: HTMLElement): HTMLElement | null {
+		if (!(target instanceof HTMLElement) || !root.contains(target)) return null;
+		return target.closest<HTMLElement>('[role="gridcell"], td, .table-cell-wrapper, .table-cell, [data-node-id], .canvas-node, .internal-link, a');
+	}
+
+	private getBaseInteractionCitekeys(target: HTMLElement | null, root: HTMLElement): string[] {
+		const owner = this.getBaseInteractionOwner(target, root);
+		if (!(owner instanceof HTMLElement)) return [];
+		const exact = this.extractStandaloneCitationFromElement(owner);
+		const nearby = exact ? null : this.findStandaloneCitationInNearbySubtree(owner, 5, 28);
+		const citekey = (exact || nearby?.citekey || '').replace(/^@+/, '').trim();
+		return citekey ? this.normalizeSidebarSelectedCitekeys([citekey]) : [];
+	}
+
+	private getBaseInteractionNodeIds(target: HTMLElement | null, root: HTMLElement, file: TFile): string[] {
+		const owner = this.getBaseInteractionOwner(target, root);
+		if (!(owner instanceof HTMLElement)) return [];
+		const nodeId = this.resolveDiscourseNodeIdFromElement(owner, file.path);
+		return nodeId ? [nodeId] : [];
+	}
+
+	private async syncGenericBaseSelectionForLeaf(leaf: WorkspaceLeaf | null, file: TFile, interactionTarget?: HTMLElement | null) {
+		const root = this.getBaseViewRoot(leaf);
+		if (!(root instanceof HTMLElement)) {
+			this._baseSelectionAnchorByFile.delete(file.path);
+			await this.clearSidebarSelectedContext(file.path);
+			await this.clearSidebarFocusedDiscourseNodes(file.path);
+			return;
+		}
+		const interactedCitekeys = this.getBaseInteractionCitekeys(interactionTarget || null, root);
+		const interactedNodeIds = this.getBaseInteractionNodeIds(interactionTarget || null, root, file);
+		if (interactedCitekeys.length > 0 || interactedNodeIds.length > 0) {
+			this.setBaseSelectionAnchor(file.path, interactedCitekeys, interactedNodeIds);
+		}
+		const anchor = this.getBaseSelectionAnchor(file.path);
+		const selectedCitekeys = this.getBaseSelectedCitekeys(root);
+		const selectedNodeIds = this.getBaseSelectedDiscourseNodeIds(root, file);
+		const citekeys = interactedCitekeys.length > 0
+			? interactedCitekeys
+			: selectedCitekeys.length > 0
+				? selectedCitekeys
+				: (anchor?.citekeys || []);
+		if (citekeys.length > 0) {
+			await this.setSidebarSelectedContext({
+				kind: citekeys.length > 1 ? 'multi' : 'text',
+				citekeys,
+				source: 'base-selection',
+			}, file.path);
+		} else if (this.getSidebarSelectedContext(file.path)?.source === 'base-selection') {
+			await this.clearSidebarSelectedContext(file.path);
+		}
+		const nodeIds = interactedNodeIds.length > 0
+			? interactedNodeIds
+			: selectedNodeIds.length > 0
+				? selectedNodeIds
+				: (anchor?.nodeIds || []);
+		if (nodeIds.length > 0) {
+			await this.setSidebarFocusedDiscourseNodes(nodeIds, file.path, 'base-selection');
+		} else if (this._sidebarFocusedDiscourseNodes?.filePath === file.path && this._sidebarFocusedDiscourseNodes.source === 'base-selection') {
+			await this.clearSidebarFocusedDiscourseNodes(file.path);
+		}
+	}
+
+	private scheduleDiscourseSelectionSync(leaf: WorkspaceLeaf | null, filePath: string, delayMs: number = 30) {
+		if (this._discourseSelectionSyncTimer != null) {
+			window.clearTimeout(this._discourseSelectionSyncTimer);
+		}
+		this._discourseSelectionSyncTimer = window.setTimeout(() => {
+			this._discourseSelectionSyncTimer = null;
+			void this.syncDiscourseSelectionForLeaf(leaf, filePath);
+		}, delayMs);
+	}
+
+	private startDiscourseStatePoll(leaf: WorkspaceLeaf | null, filePath: string) {
+		if (this._discourseStatePollTimer != null) {
+			window.clearInterval(this._discourseStatePollTimer);
+			this._discourseStatePollTimer = null;
+		}
+		if (this.getDiscourseViewStore(leaf)?.listen) {
+			return;
+		}
+		const run = () => {
+			void this.syncDiscourseSelectionForLeaf(leaf, filePath);
+			void this.syncDiscourseHoverForLeaf(leaf, filePath);
+		};
+		run();
+		this._discourseStatePollTimer = window.setInterval(run, 320);
+	}
+
+	private async syncDiscourseSelectionForLeaf(leaf: WorkspaceLeaf | null, filePath: string) {
+		const root = this.getBaseViewRoot(leaf);
+		if (!(root instanceof HTMLElement)) {
+			this.discourseSelectionSyncDebugOnce('selection-sync-no-root', { filePath });
+			await this.clearSidebarSelectedContext(filePath);
+			await this.clearSidebarFocusedDiscourseNodes(filePath);
+			return;
+		}
+		const selectedNodeIds = await this.resolveSelectedDiscourseNodeIdsFromStore(leaf, filePath);
+		if (selectedNodeIds.length > 0) {
+			await this.setSidebarFocusedDiscourseNodes(selectedNodeIds, filePath, 'canvas-selection');
+		} else if (this._sidebarFocusedDiscourseNodes?.filePath === filePath && this._sidebarFocusedDiscourseNodes.source === 'canvas-selection') {
+			await this.clearSidebarFocusedDiscourseNodes(filePath);
+		}
+		const selected = this.resolveSelectedDiscourseContextForLeaf(root, filePath, leaf);
+		if (selected) {
+			this.discourseSelectionSyncDebugOnce('selection-sync-using-selected-context', {
+				filePath,
+				selected,
+			});
+			await this.setSidebarSelectedContext(selected, filePath);
+			return;
+		}
+		if (Date.now() < this._discourseLocateSuppressUntil) {
+			this.discourseSelectionSyncDebugOnce('selection-sync-suppressed-clear', { filePath });
+			return;
+		}
+		this.discourseSelectionSyncDebugOnce('selection-sync-clearing-focus', { filePath });
+		await this.clearSidebarSelectedContext(filePath);
+	}
+
+	private scheduleDiscourseHoverSync(leaf: WorkspaceLeaf | null, filePath: string, delayMs: number = 0) {
+		window.setTimeout(() => {
+			void this.syncDiscourseHoverForLeaf(leaf, filePath);
+		}, delayMs);
+	}
+
+	private async syncDiscourseHoverForLeaf(leaf: WorkspaceLeaf | null, filePath: string) {
+		if (!this.settings.showCitationHoverCard) {
 			this.hideBaseHoverCard();
 			return;
 		}
-		if (
-			(this._baseHoverCardEl && this._baseHoverCardEl.contains(target)) ||
-			(this._baseHoverTargetEl && this._baseHoverTargetEl.contains(target))
-		) {
+		const root = this.getBaseViewRoot(leaf);
+		if (!(root instanceof HTMLElement)) {
+			this.hideBaseHoverCard();
+			return;
+		}
+		const hovered = this.resolveHoveredDiscourseTextFromStore(leaf, filePath, root);
+		if (!hovered?.citekey || !(hovered.element instanceof HTMLElement)) {
+			this.hideBaseHoverCard();
+			return;
+		}
+		const anchor = hovered.element;
+		if (this._baseHoverTargetEl === anchor && this._baseHoverCardEl?.isConnected && this._baseHoverRootEl === root) {
+			if (this._baseHoverHideTimer != null) {
+				window.clearTimeout(this._baseHoverHideTimer);
+				this._baseHoverHideTimer = null;
+			}
+			this.clearBaseHoverSwitchTimer();
+			this.positionBaseHoverCard(this._baseHoverCardEl, anchor, root);
+			return;
+		}
+		if (this._baseHoverCardEl?.isConnected && this._baseHoverTargetEl) {
+			this.scheduleSwitchBaseHoverCard(anchor, hovered.citekey, root);
+			return;
+		}
+		this.showBaseHoverCard(anchor, hovered.citekey, root);
+	}
+
+	private handleDocumentMouseDown(event: MouseEvent) {
+		const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+		const target = path.find((node): node is HTMLElement => node instanceof HTMLElement)
+			|| (event.target instanceof HTMLElement ? event.target : null);
+		if (this.isSidebarTarget(target, path)) {
+			return;
+		}
+		if (!(target instanceof HTMLElement)) {
+			this.hideBaseHoverCard();
+			return;
+		}
+		if (this._baseHoverCardEl && this._baseHoverCardEl.contains(target)) {
+			return;
+		}
+		const activeLeaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
+		const root = this._baseHoverRootEl ?? this.getBaseViewRoot(activeLeaf);
+		const container = this.getBaseViewContainer(activeLeaf);
+		if (!(root instanceof HTMLElement)) {
+			this.hideBaseHoverCard();
+			return;
+		}
+		const rootContainsTarget = root.contains(target)
+			|| path.includes(root)
+			|| (container instanceof HTMLElement && (container.contains(target) || path.includes(container)));
+		if (!rootContainsTarget) {
+			this.hideBaseHoverCard();
+			return;
+		}
+		if (this.isIgnoredBaseHoverElement(target)) {
+			this.hideBaseHoverCard();
 			return;
 		}
 		this.hideBaseHoverCard();
+	}
+
+	private handleDocumentClick(event: MouseEvent) {
+		const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+		const target = path.find((node): node is HTMLElement => node instanceof HTMLElement)
+			|| (event.target instanceof HTMLElement ? event.target : null);
+		if (this.isSidebarTarget(target, path)) {
+			return;
+		}
+		const context = this.getCanvasLikeLeafAndFile();
+		if (!context) return;
+		if (this.settings.enableDiscourseGraphsCompatibility) return;
+		const { file: activeFile, root } = context;
+		if (!(target instanceof HTMLElement)) return;
+		if (this._baseHoverCardEl?.contains(target)) return;
+		const rootContainsTarget = root.contains(target) || path.includes(root);
+		if (!rootContainsTarget) return;
+		if (this.isIgnoredBaseHoverElement(target)) return;
+
+		const filePath = activeFile.path;
+		this.hideBaseHoverCard();
+		this._suppressBaseHoverUntil = Date.now() + 450;
+		void (async () => {
+			const clickedFocused = await this.resolveDiscourseCanvasClickedCitekey(activeFile, event, root);
+			if (clickedFocused) {
+				await this.setSidebarFocusedCitekey(clickedFocused, filePath);
+			} else {
+				await this.clearSidebarFocusedCitekey(filePath);
+			}
+		})();
 	}
 
 	private parseYear(raw: Record<string, unknown>): string {
@@ -1344,9 +4554,7 @@ export default class ZotsidianPlugin extends Plugin {
 			this._indexPromiseByScope.delete(scope);
 			this.view?.refreshHeaderStatus();
 			if (this.getActiveScope() === scope) {
-				void this.view?.refreshReferences().then(async () => {
-					await this.view?.renderReferences();
-				});
+				void this.refreshSidebarView();
 			}
 		});
 		this._indexPromiseByScope.set(scope, promise);
@@ -1391,16 +4599,21 @@ export default class ZotsidianPlugin extends Plugin {
 		const q = query.trim().toLowerCase();
 		if (!scope || !q) return [];
 
-		let entries: CitationIndexEntry[] = [];
-		try {
-			entries = await this.ensureCitationIndex(scope, false);
-		} catch (_err) {
-			entries = [];
+		let entries: CitationIndexEntry[] = this._indexByScope.get(scope) || [];
+		if (entries.length === 0) {
+			entries = this.loadCitationIndexFromDisk(scope);
 		}
 		const cachedMatches = this.searchEntries(entries, q, limit);
 		if (cachedMatches.length > 0) {
+			void this.ensureCitationIndex(scope, false).catch(() => {
+				/* background refresh */
+			});
 			return cachedMatches;
 		}
+
+		void this.ensureCitationIndex(scope, false).catch(() => {
+			/* background refresh */
+		});
 
 		try {
 			const liveRows = await libraryCitekeysTitles(scope, query, Math.max(40, limit * 2)) as Array<{
@@ -1430,7 +4643,7 @@ export default class ZotsidianPlugin extends Plugin {
 			// Keep cached result path as the fast default.
 		}
 
-		return cachedMatches;
+		return this.searchEntries(entries, q, limit);
 	}
 
 	async getCitationMapFor(scopePath: string, citekeys: string[]): Promise<Map<string, Record<string, unknown>>> {
@@ -1878,6 +5091,7 @@ export default class ZotsidianPlugin extends Plugin {
 				citekey: typeof raw.id === 'string' ? raw.id : normalizedCitekey,
 				doi: typeof raw.DOI === 'string' ? raw.DOI : undefined,
 				title: typeof raw.title === 'string' ? raw.title : undefined,
+				zoteroDataDir: this.settings.zoteroDataDir || undefined,
 			} : undefined;
 
 			let attachmentRows: Array<{ label: string; open: string }> = [];
@@ -1967,7 +5181,7 @@ export default class ZotsidianPlugin extends Plugin {
 		});
 	}
 
-	private async loadDiscourseConfigIfNeeded(): Promise<void> {
+	async loadDiscourseConfigIfNeeded(): Promise<void> {
 		if (this._discourseConfigLoaded) return;
 		this._discourseConfigLoaded = true;
 		try {
@@ -1978,6 +5192,21 @@ export default class ZotsidianPlugin extends Plugin {
 				this._discourseNodesFolderPath = cfg.nodesFolderPath.trim();
 			}
 			if (Array.isArray(cfg.nodeTypes)) {
+				this._discourseNodeTypes = cfg.nodeTypes
+					.map((node) => {
+						if (!node || typeof node !== 'object') return null;
+						const n = node as Record<string, unknown>;
+						const id = typeof n.id === 'string' ? n.id : '';
+						const name = typeof n.name === 'string' ? n.name : '';
+						if (!id || !name) return null;
+						return {
+							id,
+							name,
+							format: typeof n.format === 'string' ? n.format : '',
+							color: typeof n.color === 'string' ? n.color : '',
+						} as DiscourseNodeTypeInfo;
+					})
+					.filter((node): node is DiscourseNodeTypeInfo => !!node);
 				const sourceType = cfg.nodeTypes.find((node: unknown) => {
 					if (!node || typeof node !== 'object') return false;
 					const n = node as Record<string, unknown>;
@@ -1990,6 +5219,22 @@ export default class ZotsidianPlugin extends Plugin {
 		} catch (_err) {
 			// Optional integration: keep going when discourse-graphs is unavailable.
 		}
+	}
+
+	getDiscourseNodeTypes(): DiscourseNodeTypeInfo[] {
+		return [...this._discourseNodeTypes];
+	}
+
+	private getDiscourseNodeTypeById(nodeTypeId: string | null | undefined): DiscourseNodeTypeInfo | null {
+		if (typeof nodeTypeId !== 'string' || !nodeTypeId) return null;
+		return this._discourseNodeTypes.find((nodeType) => nodeType.id === nodeTypeId) || null;
+	}
+
+	private shouldShowDiscourseNodeType(nodeTypeId: string | null | undefined): boolean {
+		const selectedIds = this.settings.discourseGraphVisibleNodeTypeIds || [];
+		if (selectedIds.length === 0) return true;
+		if (typeof nodeTypeId !== 'string' || !nodeTypeId) return false;
+		return selectedIds.includes(nodeTypeId);
 	}
 
 	private async loadSourceTemplateDefaults(): Promise<Record<string, unknown>> {
@@ -2067,6 +5312,22 @@ export default class ZotsidianPlugin extends Plugin {
 			}
 		});
 
+		this.addCommand({
+			id: 'refresh-zotero-connection-and-index',
+			name: 'Zotsidian: Refresh Zotero connection and index',
+			callback: async () => {
+				await this.refreshActiveScopeAndView(true);
+			}
+		});
+
+		this.addCommand({
+			id: 'debug-dump-discourse-canvas-snapshot',
+			name: 'Zotsidian: Debug dump active discourse canvas snapshot',
+			callback: async () => {
+				await this.dumpActiveDiscourseCanvasDebugSnapshot();
+			}
+		});
+
 		this.registerEvent(this.app.workspace.on('file-open', async (file: TFile | null) => {
 			if (!file) {
 				this.syncActiveBaseViewSupport(this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf());
@@ -2076,9 +5337,13 @@ export default class ZotsidianPlugin extends Plugin {
 			await this.tryBootstrapDiscourseSource(file);
 			this.syncActiveBaseViewSupport(this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf());
 			await this.setActiveFilePath(file.path);
+			await this.syncActiveMarkdownLineContext();
 		}));
 
 		this.registerEvent(this.app.workspace.on('active-leaf-change', async (leaf: WorkspaceLeaf | null) => {
+			if (leaf?.view instanceof ReferencesView) {
+				return;
+			}
 			this.syncActiveBaseViewSupport(leaf);
 			const file = this.getLeafFile(leaf) ?? this.app.workspace.getActiveFile();
 			if (!file) {
@@ -2086,10 +5351,19 @@ export default class ZotsidianPlugin extends Plugin {
 				return;
 			}
 			if (file.path === this.activeFilePath) {
-				await this.view?.renderReferences();
+				await this.refreshSidebarView();
+				await this.syncActiveMarkdownLineContext();
 				return;
 			}
 			await this.setActiveFilePath(file.path);
+			await this.syncActiveMarkdownLineContext();
+		}));
+
+		this.registerEvent(this.app.workspace.on('editor-change', async (_editor, info) => {
+			const file = info.file;
+			if (!(file instanceof TFile)) return;
+			if (file.path !== this.activeFilePath) return;
+			await this.syncActiveMarkdownLineContext();
 		}));
 
 		this.registerEvent(this.app.workspace.on('editor-menu', (menu, editor) => {
@@ -2102,16 +5376,25 @@ export default class ZotsidianPlugin extends Plugin {
 			});
 		}));
 
-		this.registerEditorExtension(createCitationHoverExtension(this));
-		this.registerDomEvent(document, 'mouseover', (event: MouseEvent) => this.handleDocumentMouseOver(event));
-		this.registerDomEvent(document, 'mouseout', (event: MouseEvent) => this.handleDocumentMouseOut(event));
-		this.registerDomEvent(document, 'mousedown', (event: MouseEvent) => this.handleDocumentMouseDown(event));
+			this.registerEditorExtension(createCitationHoverExtension(this));
+			this.registerDomEvent(document, 'mouseover', (event: MouseEvent) => this.handleDocumentMouseOver(event));
+			this.registerDomEvent(document, 'mousemove', (event: MouseEvent) => this.handleDocumentMouseOver(event));
+			this.registerDomEvent(document, 'mouseout', (event: MouseEvent) => this.handleDocumentMouseOut(event));
+			this.registerDomEvent(document, 'mousedown', (event: MouseEvent) => this.handleDocumentMouseDown(event));
+			this.registerDomEvent(document, 'pointerdown', (event: MouseEvent) => this.handleDocumentMouseDown(event), { capture: true });
+			this.registerDomEvent(document, 'click', (event: MouseEvent) => this.handleDocumentClick(event), { capture: true });
 
 		this.addSettingTab(new ZotsidianSettingTab(this.app, this));
 
 		this.app.workspace.onLayoutReady(async () => {
 			await this.initLeaf();
 			this.syncActiveBaseViewSupport(this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf());
+			const initialFile = this.getLeafFile(this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf())
+				?? this.app.workspace.getActiveFile();
+			if (initialFile instanceof TFile) {
+				await this.setActiveFilePath(initialFile.path);
+				await this.syncActiveMarkdownLineContext();
+			}
 			if (this.settings.preloadIndexOnStartup) {
 				this.ensureCitationIndex(this.settings.defaultZoteroScope, false)
 					.catch((err) => console.error('Zotsidian index preload failed:', err));
@@ -2127,6 +5410,10 @@ export default class ZotsidianPlugin extends Plugin {
 				});
 			}, ms));
 		}
+
+		this.registerInterval(window.setInterval(() => {
+			void this.syncActiveMarkdownLineContext();
+		}, 360));
 	}
 
 	onunload() {
@@ -2174,11 +5461,17 @@ export default class ZotsidianPlugin extends Plugin {
 			sourceNotesFolderPath: this.settings.sourceNotesFolderPath,
 			sourceTemplatePath: this.settings.sourceTemplatePath,
 			enableSidebarAttachments: this.settings.enableSidebarAttachments,
+			zoteroDataDir: this.settings.zoteroDataDir,
 			showSourceRelatedPapers: this.settings.showSourceRelatedPapers,
 			relatedPapersProvider: this.settings.relatedPapersProvider,
 			citationInsertFormat: this.settings.citationInsertFormat,
 			showCitationHoverCard: this.settings.showCitationHoverCard,
 			citationHoverOpenAction: this.settings.citationHoverOpenAction,
+			enableDiscourseGraphsCompatibility: this.settings.enableDiscourseGraphsCompatibility,
+			discourseGraphVisibleNodeTypeIds: Array.isArray(this.settings.discourseGraphVisibleNodeTypeIds)
+				? [...this.settings.discourseGraphVisibleNodeTypeIds]
+				: [],
+			enableDiscourseDebugLogging: this.settings.enableDiscourseDebugLogging,
 			showJsonFallbackSettingInAdvanced: this.settings.showJsonFallbackSettingInAdvanced,
 		};
 		this.settings = cleanSettings;
