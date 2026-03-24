@@ -343,13 +343,13 @@ class ZotsidianSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Source pages folder')
-			.setDesc('Folder where @source pages are stored.')
+			.setDesc('Folder where @source pages are stored. Leave empty to store source pages in the vault root.')
 			.addText((text) => {
 				text
-					.setPlaceholder('source')
+					.setPlaceholder('source (leave empty for vault root)')
 					.setValue(this.plugin.settings.sourceNotesFolderPath)
 					.onChange(async (value) => {
-						this.plugin.settings.sourceNotesFolderPath = value?.trim() || 'source';
+						this.plugin.settings.sourceNotesFolderPath = this.plugin.normalizeSourceNotesFolderSetting(value);
 						await this.plugin.saveSettings();
 					});
 			});
@@ -3761,18 +3761,39 @@ export default class ZotsidianPlugin extends Plugin {
 		return key.toLowerCase().replace(/[^a-z0-9]/g, '');
 	}
 
+	normalizeSourceNotesFolderSetting(value: string | null | undefined): string {
+		const normalized = (value || '').trim().replace(/^\/+|\/+$/g, '');
+		if (normalized === '.' || normalized === './') return '';
+		return normalized;
+	}
+
+	private getConfiguredSourceNotesFolder(): string {
+		return this.normalizeSourceNotesFolderSetting(this.settings.sourceNotesFolderPath);
+	}
+
+	private buildSourceNotePath(citekey: string, folderOverride?: string | null): string {
+		const key = citekey.replace(/^@+/, '').trim();
+		const folder = this.normalizeSourceNotesFolderSetting(folderOverride ?? this.getConfiguredSourceNotesFolder());
+		return folder ? normalizePath(`${folder}/@${key}.md`) : normalizePath(`@${key}.md`);
+	}
+
 	private resolveSourceNoteFile(citekey: string): TFile | null {
 		const key = citekey.replace(/^@+/, '').trim();
 		if (!key) return null;
-		const folder = (this.settings.sourceNotesFolderPath || this._discourseNodesFolderPath || 'source').trim();
-		const exactPath = normalizePath(`${folder}/@${key}.md`);
+		const folder = this.getConfiguredSourceNotesFolder();
+		const exactPath = this.buildSourceNotePath(key, folder);
 		const exact = this.app.vault.getAbstractFileByPath(exactPath);
 		if (exact instanceof TFile) return exact;
 
 		const canonical = this.canonicalCitekey(key);
-		const prefix = `${normalizePath(folder)}/@`;
 		for (const md of this.app.vault.getMarkdownFiles()) {
-			if (!md.path.startsWith(prefix)) continue;
+			if (folder) {
+				const prefix = `${normalizePath(folder)}/@`;
+				if (!md.path.startsWith(prefix)) continue;
+			} else {
+				if (md.parent?.path) continue;
+				if (!md.name.startsWith('@')) continue;
+			}
 			const mdKey = md.basename.replace(/^@+/, '');
 			if (this.canonicalCitekey(mdKey) === canonical) {
 				return md;
@@ -4571,9 +4592,9 @@ export default class ZotsidianPlugin extends Plugin {
 			const lookup = await this.getCitationMapFor(scope, [key]);
 			citationRaw = lookup.get(key) || citationRaw;
 		}
-		const sourceFolder = (this.settings.sourceNotesFolderPath || this._discourseNodesFolderPath || 'source').trim();
+		const sourceFolder = this.getConfiguredSourceNotesFolder();
 		await this.ensureFolderExists(sourceFolder);
-		const path = normalizePath(`${sourceFolder}/@${key}.md`);
+		const path = this.buildSourceNotePath(key, sourceFolder);
 
 		let file = this.app.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile)) {
@@ -4693,6 +4714,7 @@ export default class ZotsidianPlugin extends Plugin {
 
 	private async ensureFolderExists(folder: string): Promise<void> {
 		const normalized = normalizePath(folder);
+		if (!normalized) return;
 		if (this.app.vault.getAbstractFileByPath(normalized)) return;
 		await this.app.vault.createFolder(normalized);
 	}
@@ -4824,9 +4846,9 @@ export default class ZotsidianPlugin extends Plugin {
 		if (!file.basename.startsWith('@')) return;
 
 		await this.loadDiscourseConfigIfNeeded();
-		const sourceFolder = (this.settings.sourceNotesFolderPath || this._discourseNodesFolderPath || 'source').trim();
+		const sourceFolder = this.getConfiguredSourceNotesFolder();
 		await this.ensureFolderExists(sourceFolder);
-		const targetPath = normalizePath(`${sourceFolder}/${file.name}`);
+		const targetPath = sourceFolder ? normalizePath(`${sourceFolder}/${file.name}`) : normalizePath(file.name);
 		let targetFile = file;
 
 		if (file.path !== targetPath) {
