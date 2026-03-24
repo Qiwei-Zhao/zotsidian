@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.1
+
+### Added
+
+- support for storing source pages in the vault root by leaving `Source pages folder` empty
+
+### Improved
+
+- source page path handling so creation, lookup, and bootstrap now follow the same folder-setting logic
+- settings text for `Source pages folder` to make the root-folder behavior explicit
+
 ## 0.1.0
 
 ### Added
