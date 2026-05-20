@@ -1,5 +1,5 @@
 import type { Extension } from '@codemirror/state';
-import { EditorView, hoverTooltip, type Tooltip } from '@codemirror/view';
+import { EditorView, type Tooltip, hoverTooltip } from '@codemirror/view';
 
 import type ZotsidianPlugin from 'main';
 import { extractCitationMentions, type CitationMention } from 'ReferenceProcessing';
@@ -14,12 +14,54 @@ function findCitationMentionAt(docText: string, pos: number): CitationMention | 
   return null;
 }
 
+function isPositionInYamlFrontmatter(docText: string, pos: number): boolean {
+  const frontmatter = docText.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/);
+  return !!frontmatter && pos <= frontmatter[0].length;
+}
+
+function isIgnoredEditorHoverTarget(view: EditorView, pos: number): boolean {
+  const ignoredSelector = [
+    '.metadata-container',
+    '.metadata-properties',
+    '.metadata-property',
+    '.metadata-property-value',
+    '.inline-title',
+    '.view-header',
+    '.workspace-tab-header',
+    '.popover',
+    '.tooltip',
+  ].join(', ');
+
+  const coords = view.coordsAtPos(pos);
+  if (coords) {
+    const x = Math.max(coords.left, Math.min(coords.right, coords.left + 1));
+    const y = Math.max(coords.top, Math.min(coords.bottom, (coords.top + coords.bottom) / 2));
+    const elements = typeof document.elementsFromPoint === 'function'
+      ? document.elementsFromPoint(x, y)
+      : [document.elementFromPoint(x, y)].filter(Boolean) as Element[];
+    for (const element of elements) {
+      if (!(element instanceof HTMLElement) || !view.dom.contains(element)) continue;
+      if (element.closest(ignoredSelector)) return true;
+      break;
+    }
+  }
+
+  const domAtPos = view.domAtPos(pos).node;
+  const element = domAtPos instanceof HTMLElement
+    ? domAtPos
+    : (domAtPos.parentElement instanceof HTMLElement ? domAtPos.parentElement : null);
+  return !!element?.closest(ignoredSelector);
+}
+
 function setExternalLinkAttrs(link: HTMLAnchorElement, href: string) {
   link.href = href;
   if (href.startsWith('http')) {
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
   }
+  link.addEventListener('mousedown', (evt) => evt.stopPropagation());
+  link.addEventListener('pointerdown', (evt) => evt.stopPropagation());
+  link.addEventListener('click', (evt) => evt.stopPropagation());
 }
 
 function semanticScholarUrl(doi: string, title: string): string {
@@ -111,6 +153,7 @@ async function hydrateHoverCard(plugin: ZotsidianPlugin, mount: HTMLElement, cit
   });
   sourceAction.addEventListener('click', async (evt) => {
     evt.preventDefault();
+    evt.stopPropagation();
     await plugin.openOrCreateSourcePage(citekey, data.title);
   });
 
@@ -152,6 +195,8 @@ export function createCitationHoverExtension(plugin: ZotsidianPlugin): Extension
     const docText = view.state.doc.toString();
     const mention = findCitationMentionAt(docText, pos);
     if (!mention) return null;
+    if (isPositionInYamlFrontmatter(docText, mention.from)) return null;
+    if (isIgnoredEditorHoverTarget(view, mention.from)) return null;
 
     return {
       pos: mention.from,

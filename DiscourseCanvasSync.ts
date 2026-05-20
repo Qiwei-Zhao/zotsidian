@@ -33,6 +33,7 @@ type HoverSyncDeps = {
 	getRoot: (leaf: WorkspaceLeaf | null) => HTMLElement | null;
 	resolveHoveredText: (leaf: WorkspaceLeaf | null, filePath: string, root: HTMLElement) => { citekey: string; element: HTMLElement | null } | null;
 	hideHoverCard: () => void;
+	shouldKeepHoverCardAlive?: () => boolean;
 	isCurrentHoverTarget: (anchor: HTMLElement, root: HTMLElement) => boolean;
 	hasConnectedHoverCard: () => boolean;
 	positionCurrentHoverCard: (anchor: HTMLElement, root: HTMLElement) => void;
@@ -90,6 +91,11 @@ export async function syncDiscourseHover(deps: HoverSyncDeps): Promise<void> {
 	}
 	const hovered = deps.resolveHoveredText(deps.leaf, deps.filePath, root);
 	if (!hovered?.citekey || !(hovered.element instanceof HTMLElement)) {
+		if (deps.shouldKeepHoverCardAlive?.()) {
+			deps.clearHideTimer();
+			deps.clearSwitchTimer();
+			return;
+		}
 		deps.hideHoverCard();
 		return;
 	}

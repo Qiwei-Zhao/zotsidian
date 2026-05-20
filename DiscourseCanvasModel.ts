@@ -32,10 +32,21 @@ export type DiscourseCanvasCameraEntry = {
 	z: number;
 };
 
+export type DiscourseCanvasRelationEntry = {
+	pageId: string;
+	relationShapeId: string;
+	fromShapeId: string;
+	toShapeId: string;
+	kind: 'discourse' | 'arrow';
+	label: string;
+	relationTypeId: string | null;
+};
+
 export type DiscourseCanvasModel = {
 	mtime: number;
 	nodes: Map<string, DiscourseCanvasNodeEntry>;
 	textShapes: DiscourseCanvasTextEntry[];
+	relations: DiscourseCanvasRelationEntry[];
 	pageCitekeys: Map<string, string[]>;
 	cameras: Map<string, DiscourseCanvasCameraEntry>;
 	pageNames: Map<string, string>;
@@ -56,6 +67,11 @@ export function buildDiscourseCanvasModel(
 ): DiscourseCanvasModel {
 	const nodes = new Map<string, DiscourseCanvasNodeEntry>();
 	const textShapes: DiscourseCanvasTextEntry[] = [];
+	const arrowPageIds = new Map<string, string>();
+	const arrowBindings = new Map<string, { start?: string; end?: string }>();
+	const discourseRelationPageIds = new Map<string, string>();
+	const discourseRelationProps = new Map<string, { label: string; relationTypeId: string | null }>();
+	const discourseRelationBindings = new Map<string, { start?: string; end?: string }>();
 	const pageCitekeys = new Map<string, string[]>();
 	const cameras = new Map<string, DiscourseCanvasCameraEntry>();
 	const pageNames = new Map<string, string>();
@@ -94,6 +110,35 @@ export function buildDiscourseCanvasModel(
 			continue;
 		}
 
+		if (typeName === 'binding' && record.type === 'arrow') {
+			const fromId = typeof record.fromId === 'string' ? record.fromId : '';
+			const toId = typeof record.toId === 'string' ? record.toId : '';
+			const props = (record.props && typeof record.props === 'object') ? record.props as Record<string, unknown> : {};
+			const terminal = props.terminal === 'start' || props.terminal === 'end' ? props.terminal : null;
+			const arrowId = fromId.startsWith('shape:') && arrowPageIds.has(fromId) ? fromId : toId;
+			const boundShapeId = arrowId === fromId ? toId : fromId;
+			if (terminal && arrowId.startsWith('shape:') && boundShapeId.startsWith('shape:')) {
+				const current = arrowBindings.get(arrowId) || {};
+				current[terminal] = boundShapeId;
+				arrowBindings.set(arrowId, current);
+			}
+			continue;
+		}
+
+		if (typeName === 'binding' && record.type === 'discourse-relation') {
+			const fromId = typeof record.fromId === 'string' ? record.fromId : '';
+			const toId = typeof record.toId === 'string' ? record.toId : '';
+			const props = (record.props && typeof record.props === 'object') ? record.props as Record<string, unknown> : {};
+			const terminal = props.terminal === 'start' || props.terminal === 'end' ? props.terminal : null;
+			const relationShapeId = fromId.startsWith('shape:') ? fromId : '';
+			if (terminal && relationShapeId && toId.startsWith('shape:')) {
+				const current = discourseRelationBindings.get(relationShapeId) || {};
+				current[terminal] = toId;
+				discourseRelationBindings.set(relationShapeId, current);
+			}
+			continue;
+		}
+
 		const shapeId = recordId;
 		if (!shapeId.startsWith('shape:')) continue;
 		const pageId = typeof record.parentId === 'string' ? record.parentId : '';
@@ -103,6 +148,19 @@ export function buildDiscourseCanvasModel(
 		const y = typeof record.y === 'number' ? record.y : 0;
 		const w = typeof props.w === 'number' ? props.w : 0;
 		const h = typeof props.h === 'number' ? props.h : 0;
+
+		if (record.type === 'arrow') {
+			arrowPageIds.set(shapeId, pageId);
+			continue;
+		}
+
+		if (record.type === 'discourse-relation') {
+			const label = typeof props.text === 'string' ? props.text : '';
+			const relationTypeId = typeof props.relationTypeId === 'string' ? props.relationTypeId : null;
+			discourseRelationPageIds.set(shapeId, pageId);
+			discourseRelationProps.set(shapeId, { label, relationTypeId });
+			continue;
+		}
 
 		if (record.type === 'discourse-node') {
 			const title = typeof props.title === 'string' ? props.title : '';
@@ -151,10 +209,44 @@ export function buildDiscourseCanvasModel(
 		}
 	}
 
+	const relations: DiscourseCanvasRelationEntry[] = [];
+	for (const [relationShapeId, binding] of discourseRelationBindings.entries()) {
+		if (!binding.start || !binding.end) continue;
+		if (!nodes.has(binding.start) || !nodes.has(binding.end)) continue;
+		const pageId = discourseRelationPageIds.get(relationShapeId) || nodes.get(binding.start)?.pageId || '';
+		if (!pageId) continue;
+		const relationProps = discourseRelationProps.get(relationShapeId);
+		relations.push({
+			pageId,
+			relationShapeId,
+			fromShapeId: binding.start,
+			toShapeId: binding.end,
+			kind: 'discourse',
+			label: relationProps?.label || '',
+			relationTypeId: relationProps?.relationTypeId || null,
+		});
+	}
+	for (const [arrowShapeId, binding] of arrowBindings.entries()) {
+		if (!binding.start || !binding.end) continue;
+		if (!nodes.has(binding.start) || !nodes.has(binding.end)) continue;
+		const pageId = arrowPageIds.get(arrowShapeId) || nodes.get(binding.start)?.pageId || '';
+		if (!pageId) continue;
+		relations.push({
+			pageId,
+			relationShapeId: arrowShapeId,
+			fromShapeId: binding.start,
+			toShapeId: binding.end,
+			kind: 'arrow',
+			label: '',
+			relationTypeId: null,
+		});
+	}
+
 	return {
 		mtime,
 		nodes,
 		textShapes,
+		relations,
 		pageCitekeys,
 		cameras,
 		pageNames,

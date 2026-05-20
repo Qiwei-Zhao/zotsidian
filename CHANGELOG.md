@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.1.2
+
+### New
+
+- added managed source-page annotation syncing with visible Zotero annotation anchors
+- added built-in annotation template modes for Default Markdown and Obsidian callouts
+- added custom annotation template support with Eta-backed rendering
+- added source-page template helpers for full-note, body, and frontmatter templates
+- added configurable default copy formats for text and image annotations
+
+### Enhanced
+
+- expanded annotation copy menus for both text and image annotations
+  - text annotations can now be copied as Markdown, Markdown with Zotero jump link, callout, plain text, or the current insert template
+  - image annotations can now be copied as image data, image Markdown, Markdown with Zotero jump link, callout, or the current insert template
+- improved source sidebar behavior so source metadata renders before slower attachment, related-paper, and reference lookups finish
+- improved Settings UI with clearer active tabs, lighter typography, and a more compact section layout
+- improved source-page annotation ordering using page, sort index, position, and date information
+- improved Zotero annotation links so imported annotations can jump directly back to Zotero/PDF locations when available
+
+### Fixed
+
+- source page annotation refresh is now idempotent across repeated refreshes and Markdown/callout template switches
+- existing source page annotations are preserved when Zotero attachment or annotation lookup fails
+- source page sync now re-reads the latest file contents before writing, reducing the risk of overwriting edits made during a refresh
+- Zotero local API requests now time out instead of hanging indefinitely
+- discourse canvas polling timers are cleared when the plugin unloads
+- fixed repeated generated annotation text/image imports inside a single annotation item
+- fixed template switching from preserving old generated imports as manual notes
+- fixed unsafe empty Zotero annotation results from clearing existing source-page annotations
+- fixed annotation right-click behavior so sidebar annotation text/comment areas open the Zotsidian copy menu unless text is actively selected
+
+### Internal
+
+- split source note markers, source note sync, annotation templates, source templates, and template rendering into focused modules
+- added Zotero local API annotation metadata normalization for tags, page labels, sort index, positions, image paths, and direct open links
+
 ## 0.1.1
 
 ### Added

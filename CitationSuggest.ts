@@ -92,9 +92,28 @@ export class CitationSuggest extends EditorSuggest<Suggestion> {
 		el.empty();
 		const meta = suggestion.meta ? `${suggestion.meta}  ` : '';
 		const shownId = this.plugin.normalizeCitekeyForInsert(suggestion.id);
+		const existingSource = this.plugin.findSourceNoteFile(shownId);
 		const primary = document.createElement('div');
 		primary.className = 'zotsidian-suggest-primary';
-		primary.textContent = `${meta}@${shownId}`;
+		if (meta) {
+			const metaEl = document.createElement('span');
+			metaEl.className = 'zotsidian-suggest-meta';
+			metaEl.textContent = meta.trim();
+			primary.appendChild(metaEl);
+		}
+		const citekeyEl = document.createElement('span');
+		citekeyEl.className = existingSource
+			? 'zotsidian-suggest-citekey has-source-page'
+			: 'zotsidian-suggest-citekey';
+		citekeyEl.textContent = `@${shownId}`;
+		primary.appendChild(citekeyEl);
+		if (existingSource) {
+			const badge = document.createElement('span');
+			badge.className = 'zotsidian-suggest-source-badge';
+			badge.textContent = 'source';
+			badge.setAttribute('title', `Source page exists: ${existingSource.path}`);
+			primary.appendChild(badge);
+		}
 		const secondary = document.createElement('div');
 		secondary.className = 'zotsidian-suggest-secondary';
 		secondary.textContent = suggestion.title ?? '';

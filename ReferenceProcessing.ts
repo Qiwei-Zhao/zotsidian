@@ -19,9 +19,9 @@ export interface Annotation {
     annotationAuthorName: string;
     annotationColor: string; //example "#ffd400"
     annotationComment: string
-    // annotationPageLabel: string; // "5"
-    // //annotationPosition : // example {pageIndex: 4, rects: Array(4)}
-    // //annotationSortIndex: string
+    annotationPageLabel?: string; // example "5"
+    annotationPosition?: unknown; // example {pageIndex: 4, rects: Array(4)}
+    annotationSortIndex?: string;
     annotationText: string;
     annotationType: string // example "highlight"
     dateAdded: string  // example "2025-03-08T23:41:05Z"
@@ -29,6 +29,7 @@ export interface Annotation {
     itemType: string // "annotation"
     key: string;
     parentItem: string; 
+    openHref?: string;
     //relations: 
     //tags: string[]
     //version: integer // example 60687

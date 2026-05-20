@@ -9,6 +9,11 @@ import { attachments, exportCollectionPath, normalizeExportItems, libraryCitekey
 import { fetchSourceRelatedPapers, normalizeDoi, type SemanticRelatedPaper, type RelatedPapersProvider } from 'SemanticScholar';
 import { citationsInText, extractCitationMentions } from 'ReferenceProcessing';
 import {
+	getBuiltInAnnotationTemplate,
+	normalizeAnnotationTemplatePreset,
+	type AnnotationTemplatePreset,
+} from 'AnnotationTemplate';
+import {
 	buildDiscourseCanvasModel,
 	type DiscourseCanvasModel,
 	type DiscourseCanvasNodeEntry,
@@ -28,6 +33,35 @@ import {
 	syncDiscourseHover,
 	syncDiscourseSelection,
 } from 'DiscourseCanvasSync';
+import {
+	hasAnyManagedBlock,
+	loadSourceManagedAttachmentRows,
+	normalizeAttachmentHint,
+	syncSourceNoteManagedBlocks,
+} from 'SourceNoteSync';
+import {
+	getSourceManagedBlockHeading,
+	getSourceManagedBlockMarkers,
+	type SourceManagedBlockSection,
+	wrapSourceManagedBlock,
+} from 'SourceNoteMarkers';
+import {
+	buildInitialSourcePageContent,
+	getBuiltInSourceFullNoteTemplate,
+	getDiscourseSourceFrontmatterPatch,
+	getRequiredSourceFrontmatterPatch,
+	getSourceFrontmatterDefaults,
+	loadSourceFullNoteTemplateDocument,
+	loadSourceBodyTemplate,
+	loadSourceTemplateDefaults,
+	normalizeSourceFrontmatterMode,
+	normalizeSourcePagePreset,
+	normalizeSourceManagedSectionMode,
+	type SourceFrontmatterMode,
+	type SourcePagePreset,
+	type SourceManagedSectionMode,
+} from 'SourceTemplate';
+import { getConfiguredTemplatePath } from 'TemplateRegistry';
 import {
 	getDiscourseStoreCameraRecord,
 	getDiscourseStoreCurrentPageId,
@@ -49,6 +83,8 @@ export interface CitationIndexEntry {
 
 export type CitationInsertFormat = 'pandoc' | 'plain' | 'wikilink';
 export type CitationHoverOpenAction = 'pdf-first' | 'zotero-first';
+export type AnnotationTextCopyFormat = 'markdown-link' | 'markdown' | 'callout' | 'plain' | 'current-template';
+export type AnnotationImageCopyFormat = 'image' | 'image-markdown' | 'markdown-link' | 'callout' | 'current-template';
 export type CitationConnectionState = 'unknown' | 'connecting' | 'connected' | 'degraded' | 'disconnected';
 export type CitationIndexSource = 'memory' | 'disk' | 'live-export' | 'local-api' | 'json-fallback' | 'none';
 
@@ -63,7 +99,20 @@ interface ZotsidianSettings {
 	autoBootstrapSourcePages: boolean;
 	autoCreateSourceOnCitationSelect: boolean;
 	sourceNotesFolderPath: string;
+	sourceFullNoteTemplatePath: string;
 	sourceTemplatePath: string;
+	sourceBodyTemplatePath: string;
+	sourcePagePreset: SourcePagePreset;
+	sourceAnnotationsMode: SourceManagedSectionMode;
+	sourceRelatedMode: SourceManagedSectionMode;
+	sourceReferencesMode: SourceManagedSectionMode;
+	sourceCitationsMode: SourceManagedSectionMode;
+	sourceFrontmatterMode: SourceFrontmatterMode;
+	annotationTemplatePreset: AnnotationTemplatePreset;
+	annotationTextTemplatePath: string;
+	annotationImageTemplatePath: string;
+	annotationTextCopyDefault: AnnotationTextCopyFormat;
+	annotationImageCopyDefault: AnnotationImageCopyFormat;
 	enableSidebarAttachments: boolean;
 	zoteroDataDir: string;
 	showSourceRelatedPapers: boolean;
@@ -72,7 +121,9 @@ interface ZotsidianSettings {
 	showCitationHoverCard: boolean;
 	citationHoverOpenAction: CitationHoverOpenAction;
 	enableDiscourseGraphsCompatibility: boolean;
+	showDiscourseNodeImagePreview: boolean;
 	discourseGraphVisibleNodeTypeIds: string[];
+	pinnedDiscourseNodes: PinnedDiscourseNodeItem[];
 	enableDiscourseDebugLogging: boolean;
 	showJsonFallbackSettingInAdvanced: boolean;
 }
@@ -120,6 +171,21 @@ export type DiscourseNodeSidebarItem = {
 	nodeTypeName: string;
 	nodeTypeColor: string;
 	targets: DiscourseNodeLocateTarget[];
+};
+
+export type PinnedDiscourseNodeItem = Omit<DiscourseNodeSidebarItem, 'targets'> & {
+	pinnedAt?: number;
+};
+
+export type RelatedDiscourseNodeSidebarItem = DiscourseNodeSidebarItem & {
+	relationDirection: 'incoming' | 'outgoing' | 'bidirectional';
+};
+
+type DiscourseRelationInstance = {
+	id: string;
+	type: string;
+	source: string;
+	destination: string;
 };
 
 type NativeCanvasNodeEntry = {
@@ -189,7 +255,20 @@ const DEFAULT_SETTINGS: ZotsidianSettings = {
 	autoBootstrapSourcePages: true,
 	autoCreateSourceOnCitationSelect: false,
 	sourceNotesFolderPath: 'source',
+	sourceFullNoteTemplatePath: '',
 	sourceTemplatePath: '',
+	sourceBodyTemplatePath: '',
+	sourcePagePreset: 'reading',
+	sourceAnnotationsMode: 'managed',
+	sourceRelatedMode: 'off',
+	sourceReferencesMode: 'off',
+	sourceCitationsMode: 'off',
+	sourceFrontmatterMode: 'built-in-and-template',
+	annotationTemplatePreset: 'default',
+	annotationTextTemplatePath: '',
+	annotationImageTemplatePath: '',
+	annotationTextCopyDefault: 'markdown-link',
+	annotationImageCopyDefault: 'image',
 	enableSidebarAttachments: true,
 	zoteroDataDir: '',
 	showSourceRelatedPapers: true,
@@ -198,13 +277,16 @@ const DEFAULT_SETTINGS: ZotsidianSettings = {
 	showCitationHoverCard: true,
 	citationHoverOpenAction: 'pdf-first',
 	enableDiscourseGraphsCompatibility: true,
+	showDiscourseNodeImagePreview: true,
 	discourseGraphVisibleNodeTypeIds: [],
+	pinnedDiscourseNodes: [],
 	enableDiscourseDebugLogging: false,
 	showJsonFallbackSettingInAdvanced: true,
 };
 
 class ZotsidianSettingTab extends PluginSettingTab {
 	plugin: ZotsidianPlugin;
+	private activeSettingsTab: 'general' | 'source' | 'sidebar' | 'discourse' | 'advanced' = 'general';
 
 	constructor(app: App, plugin: ZotsidianPlugin) {
 		super(app, plugin);
@@ -214,8 +296,10 @@ class ZotsidianSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+		containerEl.addClass('zotsidian-settings-root');
 
 		containerEl.createEl('h2', { text: 'Zotsidian Settings' });
+		this.renderSettingsTabs(containerEl);
 
 		containerEl.createEl('h3', { text: 'Index' });
 
@@ -354,18 +438,232 @@ class ZotsidianSettingTab extends PluginSettingTab {
 					});
 			});
 
+		const isCustomSourcePreset = this.plugin.getSourcePagePreset() === 'custom';
+
 		new Setting(containerEl)
-			.setName('Source page template path')
-			.setDesc('Optional template used to fill and update source page properties. Leave empty to use built-in defaults only.')
-			.addText((text) => {
-				text
-					.setPlaceholder('Optional')
-					.setValue(this.plugin.settings.sourceTemplatePath)
+			.setName('Use custom templates')
+			.setDesc('Turn this on only if you want to manage source-page template files directly. Most users can leave this off and configure the sections below.')
+			.addToggle((toggle) => {
+				toggle
+					.setValue(isCustomSourcePreset)
 					.onChange(async (value) => {
-						this.plugin.settings.sourceTemplatePath = value?.trim() || '';
+						this.plugin.settings.sourcePagePreset = value ? 'custom' : 'reading';
+						await this.plugin.saveSettings();
+						this.display();
+					});
+			});
+
+		if (!isCustomSourcePreset) {
+			const primaryLayoutItems: Array<{
+				name: string;
+				desc: string;
+				key: 'sourceAnnotationsMode';
+			}> = [
+				{
+					name: 'Annotations',
+					desc: 'Add an Annotations section to source pages and refresh it from Zotero when requested.',
+					key: 'sourceAnnotationsMode',
+				},
+			];
+
+			const renderSectionSetting = (parent: HTMLElement, item: {
+				name: string;
+				desc: string;
+				key: 'sourceAnnotationsMode';
+			}) => {
+				new Setting(parent)
+					.setName(item.name)
+					.setDesc(item.desc)
+					.addDropdown((dropdown) => {
+						dropdown
+							.addOption('off', 'Off')
+							.addOption('managed', 'Keep updated')
+							.setValue(this.plugin.normalizeSourceManagedSectionMode(this.plugin.settings[item.key]))
+							.onChange(async (value) => {
+								this.plugin.settings[item.key] = this.plugin.normalizeSourceManagedSectionMode(value);
+								await this.plugin.saveSettings();
+							});
+					});
+			};
+
+			containerEl.createEl('h4', { text: 'Source Page Content' });
+			for (const item of primaryLayoutItems) {
+				renderSectionSetting(containerEl, item);
+			}
+		}
+
+		containerEl.createEl('h4', { text: 'Annotation Templates' });
+		new Setting(containerEl)
+			.setName('Template guide')
+			.setDesc('Copy a compact Markdown guide with annotation and source-page template examples.')
+			.addButton((button) => {
+				button
+					.setButtonText('Copy guide')
+					.onClick(async () => {
+						await navigator.clipboard.writeText([
+							'# Zotsidian template quick guide',
+							'',
+							'## Annotation text template',
+							'',
+							'> {{annotationText}}',
+							'',
+							'{{commentBlock}}',
+							'',
+							'Available fields include {{annotationText}}, {{annotationComment}}, {{annotationTag}}, {{annotationMetaInline}}, {{openHref}}, {{calloutContent}}, and {{calloutQuoteContent}}.',
+							'',
+							'## Annotation image template',
+							'',
+							'{{localImageEmbed}}',
+							'',
+							'{{commentBlock}}',
+							'',
+							'## Callout-style example',
+							'',
+							'> [!quote] {{annotationMetaInline}} Zotero highlight · {{parentItem}}',
+							'{{calloutQuoteContent}}',
+							'>',
+							'> [Open in Zotero]({{openHref}})',
+							'',
+							'{{commentBlock}}',
+						].join('\n'));
+						new Notice('Zotsidian template guide copied.');
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Annotation insert style')
+			.setDesc('Choose the built-in Markdown format, an Obsidian callout format, or your own template files.')
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOption('default', 'Default Markdown')
+					.addOption('callout', 'Obsidian callout')
+					.addOption('custom', 'Custom template files')
+					.setValue(this.plugin.settings.annotationTemplatePreset)
+					.onChange(async (value) => {
+						this.plugin.settings.annotationTemplatePreset = this.plugin.normalizeAnnotationTemplatePreset(value);
+						await this.plugin.saveSettings();
+						this.display();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Default text annotation copy')
+			.setDesc('Used when clicking the copy button on a text annotation. Right-click the copy button for all formats.')
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOption('markdown-link', 'Markdown + Zotero link')
+					.addOption('markdown', 'Markdown')
+					.addOption('callout', 'Callout')
+					.addOption('plain', 'Plain text')
+					.addOption('current-template', 'Current insert template')
+					.setValue(this.plugin.settings.annotationTextCopyDefault)
+					.onChange(async (value) => {
+						this.plugin.settings.annotationTextCopyDefault = this.plugin.normalizeAnnotationTextCopyFormat(value);
 						await this.plugin.saveSettings();
 					});
 			});
+
+		new Setting(containerEl)
+			.setName('Default image annotation copy')
+			.setDesc('Used when clicking the copy button on an image annotation. Right-click the copy button for all formats.')
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOption('image', 'Image')
+					.addOption('image-markdown', 'Image Markdown')
+					.addOption('markdown-link', 'Markdown + Zotero link')
+					.addOption('callout', 'Callout')
+					.addOption('current-template', 'Current insert template')
+					.setValue(this.plugin.settings.annotationImageCopyDefault)
+					.onChange(async (value) => {
+						this.plugin.settings.annotationImageCopyDefault = this.plugin.normalizeAnnotationImageCopyFormat(value);
+						await this.plugin.saveSettings();
+					});
+			});
+
+		if (this.plugin.settings.annotationTemplatePreset === 'custom') {
+			new Setting(containerEl)
+				.setName('Annotation text template path')
+				.setDesc('Optional template for inserting text annotations. Supports {{annotationText}}, {{annotationComment}}, {{calloutContent}}, {{openHref}}, {{annotationTag}}, and Eta syntax.')
+				.addText((text) => {
+					text
+						.setPlaceholder('templates/zotsidian_annotation_text.md')
+						.setValue(this.plugin.settings.annotationTextTemplatePath)
+						.onChange(async (value) => {
+							this.plugin.settings.annotationTextTemplatePath = value?.trim() || '';
+							await this.plugin.saveSettings();
+						});
+				});
+
+			new Setting(containerEl)
+				.setName('Annotation image template path')
+				.setDesc('Optional template for inserting image annotations. Supports {{localImageEmbed}}, {{annotationComment}}, {{calloutContent}}, {{openHref}}, and Eta syntax.')
+				.addText((text) => {
+					text
+						.setPlaceholder('templates/zotsidian_annotation_image.md')
+						.setValue(this.plugin.settings.annotationImageTemplatePath)
+						.onChange(async (value) => {
+							this.plugin.settings.annotationImageTemplatePath = value?.trim() || '';
+							await this.plugin.saveSettings();
+						});
+				});
+		}
+
+		if (isCustomSourcePreset) {
+			containerEl.createEl('h4', { text: 'Advanced Templates' });
+			new Setting(containerEl)
+				.setName('Source page full-note template path')
+				.setDesc('Advanced. One template file for a complete new source page. If set, it overrides the body template and may include frontmatter plus section placeholders.')
+				.addText((text) => {
+					text
+						.setPlaceholder('Optional')
+						.setValue(this.plugin.settings.sourceFullNoteTemplatePath)
+						.onChange(async (value) => {
+							this.plugin.settings.sourceFullNoteTemplatePath = value?.trim() || '';
+							await this.plugin.saveSettings();
+						});
+				});
+
+			new Setting(containerEl)
+				.setName('Source page template path')
+				.setDesc('Advanced. Optional frontmatter defaults. Existing properties in source pages are not overwritten.')
+				.addText((text) => {
+					text
+						.setPlaceholder('Optional')
+						.setValue(this.plugin.settings.sourceTemplatePath)
+						.onChange(async (value) => {
+							this.plugin.settings.sourceTemplatePath = value?.trim() || '';
+							await this.plugin.saveSettings();
+						});
+				});
+
+			new Setting(containerEl)
+				.setName('Source page body template path')
+				.setDesc('Advanced. Optional Markdown body for newly created source pages. Supports {{citekey}}, {{title}}, {{authors}}, {{year}}, {{doi}}, {{journal}}, {{abstract}}, and {{zotero}}.')
+				.addText((text) => {
+					text
+						.setPlaceholder('Optional')
+						.setValue(this.plugin.settings.sourceBodyTemplatePath)
+						.onChange(async (value) => {
+							this.plugin.settings.sourceBodyTemplatePath = value?.trim() || '';
+							await this.plugin.saveSettings();
+						});
+				});
+
+			new Setting(containerEl)
+				.setName('Source page frontmatter mode')
+				.setDesc('Control how Zotsidian fills source page frontmatter. Use template-only or minimal mode if built-in fields such as status conflict with your own note system.')
+				.addDropdown((dropdown) => {
+					dropdown
+						.addOption('built-in-and-template', 'Built-in defaults + template defaults')
+						.addOption('template-only', 'Template defaults only')
+						.addOption('minimal', 'Minimal plugin metadata only')
+						.setValue(this.plugin.settings.sourceFrontmatterMode)
+						.onChange(async (value) => {
+							this.plugin.settings.sourceFrontmatterMode = this.plugin.normalizeSourceFrontmatterMode(value);
+							await this.plugin.saveSettings();
+						});
+				});
+		}
 
 		containerEl.createEl('h3', { text: 'Panels' });
 
@@ -422,6 +720,17 @@ class ZotsidianSettingTab extends PluginSettingTab {
 
 		if (this.plugin.settings.enableDiscourseGraphsCompatibility) {
 			containerEl.createEl('h3', { text: 'Discourse Graph' });
+			new Setting(containerEl)
+				.setName('Show node image previews')
+				.setDesc('When hovering a discourse node in the sidebar, show the first image from its linked note if one is available.')
+				.addToggle((toggle) => {
+					toggle
+						.setValue(this.plugin.settings.showDiscourseNodeImagePreview)
+						.onChange(async (value) => {
+							this.plugin.settings.showDiscourseNodeImagePreview = value;
+							await this.plugin.saveSettings();
+						});
+				});
 			const nodeTypeContainer = containerEl.createDiv();
 			nodeTypeContainer.createDiv({
 				text: 'Loading discourse node types...',
@@ -429,6 +738,8 @@ class ZotsidianSettingTab extends PluginSettingTab {
 			});
 			void this.renderDiscourseNodeTypeSettings(nodeTypeContainer);
 		}
+
+		containerEl.createEl('h3', { text: 'Advanced' });
 
 		new Setting(containerEl)
 			.setName('Discourse canvas debug logging')
@@ -441,6 +752,8 @@ class ZotsidianSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					});
 			});
+
+		containerEl.createEl('h3', { text: 'Sidebar' });
 
 		new Setting(containerEl)
 			.setName('Hover card primary action')
@@ -485,7 +798,6 @@ class ZotsidianSettingTab extends PluginSettingTab {
 
 		if (this.plugin.settings.showJsonFallbackSettingInAdvanced) {
 			containerEl.createEl('h3', { text: 'Advanced' });
-
 			new Setting(containerEl)
 				.setName('Local JSON fallback path')
 				.setDesc('Optional Better BibTeX JSON export used only when live Zotero lookup is incomplete.')
@@ -498,6 +810,64 @@ class ZotsidianSettingTab extends PluginSettingTab {
 							await this.plugin.saveSettings();
 						});
 				});
+		}
+
+		this.applySettingsTabVisibility(containerEl);
+	}
+
+	private renderSettingsTabs(containerEl: HTMLElement): void {
+		const tabs = containerEl.createDiv({ cls: 'zotsidian-settings-tabs' });
+		const entries: Array<[typeof this.activeSettingsTab, string]> = [
+			['general', 'General'],
+			['source', 'Source Pages'],
+			['sidebar', 'Sidebar'],
+			['discourse', 'Discourse Graph'],
+			['advanced', 'Advanced'],
+		];
+		for (const [id, label] of entries) {
+			const button = tabs.createEl('button', {
+				cls: `zotsidian-settings-tab${this.activeSettingsTab === id ? ' is-active' : ''}`,
+				text: label,
+				attr: { type: 'button', 'aria-selected': this.activeSettingsTab === id ? 'true' : 'false' },
+			});
+			button.addEventListener('click', () => {
+				this.activeSettingsTab = id;
+				this.display();
+			});
+		}
+	}
+
+	private getSettingsTabForHeading(text: string): typeof this.activeSettingsTab {
+		switch (text.trim()) {
+			case 'Index':
+			case 'Inline Citations':
+				return 'general';
+			case 'Source Pages':
+				return 'source';
+			case 'Panels':
+			case 'Sidebar':
+				return 'sidebar';
+			case 'Discourse Graph':
+				return 'discourse';
+			case 'Advanced':
+				return 'advanced';
+			default:
+				return 'general';
+		}
+	}
+
+	private applySettingsTabVisibility(containerEl: HTMLElement): void {
+		let current: typeof this.activeSettingsTab = 'general';
+		for (const child of Array.from(containerEl.children)) {
+			if (!(child instanceof HTMLElement)) continue;
+			if (child.tagName === 'H2' || child.hasClass('zotsidian-settings-tabs')) {
+				child.toggleClass('is-hidden', false);
+				continue;
+			}
+			if (child.tagName === 'H3') {
+				current = this.getSettingsTabForHeading(child.textContent || '');
+			}
+			child.toggleClass('is-hidden', current !== this.activeSettingsTab);
 		}
 	}
 
@@ -641,6 +1011,7 @@ export default class ZotsidianPlugin extends Plugin {
 	private _discourseSourceNodeTypeId: string | null = null;
 	private _discourseNodesFolderPath: string = 'discourse_graph_nodes';
 	private _discourseNodeTypes: DiscourseNodeTypeInfo[] = [];
+	private _discourseRelationsCache: { mtime: number; relations: DiscourseRelationInstance[] } | null = null;
 	private _relatedDataCache: Map<string, Promise<SourceRelatedData | null>> = new Map();
 	private _hoverDataCache: Map<string, Promise<CitationHoverData | null>> = new Map();
 	private _baseViewObserver: MutationObserver | null = null;
@@ -651,6 +1022,7 @@ export default class ZotsidianPlugin extends Plugin {
 	private _baseHoverRootEl: HTMLElement | null = null;
 	private _baseHoverHideTimer: number | null = null;
 	private _baseHoverSwitchTimer: number | null = null;
+	private _baseHoverCardInteractive = false;
 	private _suppressBaseHoverUntil: number = 0;
 	private _discourseFocusResolveToken: number = 0;
 	private _discourseSelectionSyncTimer: number | null = null;
@@ -665,6 +1037,7 @@ export default class ZotsidianPlugin extends Plugin {
 	private _sidebarFocusedDiscourseNodes: SidebarFocusedDiscourseNodes | null = null;
 	private _discourseCanvasNodesByFile: Map<string, CachedDiscourseCanvasNodeMap> = new Map();
 	private _lastMarkdownLineSelection: { filePath: string; line: number; citekeys: string[] } | null = null;
+	private _lastSourceAnnotationFocus: { filePath: string; key: string | null } | null = null;
 	private _referenceLocateCycleByKey: Map<string, number> = new Map();
 	private _markdownLocateFlashTimer: number | null = null;
 	private _baseSelectionAnchorByFile: Map<string, BaseSelectionAnchor> = new Map();
@@ -1224,6 +1597,15 @@ export default class ZotsidianPlugin extends Plugin {
 
 		const editor = view.editor;
 		const cursor = editor.getCursor('head');
+		const activeSourceAnnotationKey = this.getSourceAnnotationKeyAtEditorCursor(view);
+		if (
+			!this._lastSourceAnnotationFocus ||
+			this._lastSourceAnnotationFocus.filePath !== file.path ||
+			this._lastSourceAnnotationFocus.key !== activeSourceAnnotationKey
+		) {
+			this._lastSourceAnnotationFocus = { filePath: file.path, key: activeSourceAnnotationKey };
+			await this.renderSidebarView();
+		}
 		const line = Math.max(0, Math.min(cursor.line, editor.lastLine()));
 		const lineText = editor.getLine(line) || '';
 		const citekeys = this.normalizeSidebarSelectedCitekeys(citationsInText(lineText));
@@ -1308,6 +1690,94 @@ export default class ZotsidianPlugin extends Plugin {
 		}
 		const fallbackLine = Math.max(0, Math.min(lineStarts.length - 1, low));
 		return { line: fallbackLine, ch: Math.max(0, offset - (lineStarts[fallbackLine] || 0)) };
+	}
+
+	getActiveSourceAnnotationKey(filePath?: string): string | null {
+		const leaf = this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf();
+		if (!(leaf?.view instanceof MarkdownView)) return null;
+		const file = this.getLeafFile(leaf) ?? this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || (filePath && file.path !== filePath)) return null;
+		return this.getSourceAnnotationKeyAtEditorCursor(leaf.view);
+	}
+
+	private getSourceAnnotationKeyAtEditorCursor(view: MarkdownView): string | null {
+		const file = view.file;
+		if (!(file instanceof TFile) || !file.basename.startsWith('@')) return null;
+		const editor = view.editor;
+		if (!editor) return null;
+		const content = editor.getValue();
+		const cursor = editor.getCursor('head');
+		const offset = typeof editor.posToOffset === 'function'
+			? editor.posToOffset(cursor)
+			: this.editorPositionToOffset(content, cursor);
+		return this.getSourceAnnotationKeyAtOffset(content, offset);
+	}
+
+	private editorPositionToOffset(content: string, position: { line: number; ch: number }): number {
+		const starts = this.getLineStarts(content);
+		const line = Math.max(0, Math.min(position.line, starts.length - 1));
+		return (starts[line] || 0) + Math.max(0, position.ch);
+	}
+
+	private getSourceAnnotationKeyAtOffset(content: string, offset: number): string | null {
+		const anchorRe = /^\[Open in Zotero · ([A-Z0-9]+)\]\([^\n]+\)$/gmi;
+		const anchors: Array<{ key: string; start: number }> = [];
+		let match: RegExpExecArray | null = null;
+		while ((match = anchorRe.exec(content)) !== null) {
+			const key = (match[1] || '').trim().toUpperCase();
+			if (key) anchors.push({ key, start: match.index });
+		}
+		if (anchors.length === 0) return null;
+		for (let index = 0; index < anchors.length; index += 1) {
+			const current = anchors[index];
+			const next = anchors[index + 1];
+			const headingAfter = content.slice(current.start + 1).search(/\n##\s+/);
+			const headingEnd = headingAfter >= 0 ? current.start + 1 + headingAfter : content.length;
+			const end = Math.min(next?.start ?? content.length, headingEnd);
+			if (offset >= current.start && offset < end) return current.key;
+		}
+		return null;
+	}
+
+	async jumpToSourceAnnotation(citekey: string, annotationKey: string): Promise<boolean> {
+		const normalizedKey = (annotationKey || '').trim().toUpperCase();
+		const normalizedCitekey = (citekey || '').replace(/^@+/, '').trim();
+		if (!normalizedKey || !normalizedCitekey) return false;
+		const file = this.findSourceNoteFile(normalizedCitekey);
+		if (!(file instanceof TFile)) return false;
+		const leaf = this.getMarkdownLocateLeaf(file) || this.app.workspace.getLeaf(false);
+		if (!leaf) return false;
+		if (!(leaf.view instanceof MarkdownView) || this.getLeafFile(leaf)?.path !== file.path) {
+			await leaf.openFile(file, { active: true });
+		} else if (this.app.workspace.activeLeaf !== leaf) {
+			await this.app.workspace.setActiveLeaf(leaf, { focus: true });
+		}
+		if (!(leaf.view instanceof MarkdownView)) return false;
+		const editor = leaf.view.editor;
+		const content = editor.getValue();
+		const anchorPattern = new RegExp(`^\\[Open in Zotero · ${this.escapeRegExp(normalizedKey)}\\]\\([^\\n]+\\)$`, 'mi');
+		const matched = content.match(anchorPattern);
+		if (!matched || matched.index == null) return false;
+		const lineStarts = this.getLineStarts(content);
+		const from = this.offsetToEditorPosition(lineStarts, matched.index);
+		const to = this.offsetToEditorPosition(lineStarts, matched.index + matched[0].length);
+		editor.setSelection(from, to);
+		const cm = (editor as unknown as { cm?: { scrollIntoView?: (range: unknown, margin?: number) => void; focus?: () => void } }).cm;
+		cm?.focus?.();
+		cm?.scrollIntoView?.({ from, to }, 80);
+		this._lastSourceAnnotationFocus = { filePath: file.path, key: normalizedKey };
+		await this.renderSidebarView();
+		if (this._markdownLocateFlashTimer != null) {
+			window.clearTimeout(this._markdownLocateFlashTimer);
+			this._markdownLocateFlashTimer = null;
+		}
+		this._markdownLocateFlashTimer = window.setTimeout(() => {
+			this._markdownLocateFlashTimer = null;
+			if (this.getLeafFile(leaf)?.path !== file.path) return;
+			if (!(leaf.view instanceof MarkdownView)) return;
+			leaf.view.editor.setCursor(to);
+		}, 720);
+		return true;
 	}
 
 	private async getMarkdownReferenceLocateTargets(file: TFile, citekey: string): Promise<ReferenceLocateTarget[]> {
@@ -1965,6 +2435,222 @@ export default class ZotsidianPlugin extends Plugin {
 			...item,
 			targets: item.targets.sort((a, b) => a.order - b.order),
 		}));
+	}
+
+	private isDiscourseCanvasModelEmpty(model: DiscourseCanvasModel): boolean {
+		return model.nodes.size === 0 && model.textShapes.length === 0 && model.relations.length === 0;
+	}
+
+	private isLikelyDiscourseCanvasFile(file: TFile): boolean {
+		if (!(file instanceof TFile) || file.extension !== 'md') return false;
+		if (this.getDiscourseCanvasLeafAndFileForPath(file.path)?.file.path === file.path) return true;
+		const path = file.path.toLowerCase();
+		return path.includes('discourse_canvas') || path.includes('discourse-canvas');
+	}
+
+	private async resolveDiscourseCanvasNodeFile(canvasFile: TFile, entry: DiscourseCanvasNodeEntry): Promise<TFile | null> {
+		return (entry.src ? await this.resolveDiscourseNodeFileFromSrc(canvasFile, entry.src) : null)
+			|| this.resolveDiscourseNodeFileFromTitle(entry.title || '', canvasFile.path);
+	}
+
+	private getDiscourseNodeInstanceIdForFile(file: TFile | null | undefined): string | null {
+		if (!(file instanceof TFile)) return null;
+		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+		const nodeInstanceId = typeof frontmatter?.nodeInstanceId === 'string' ? frontmatter.nodeInstanceId.trim() : '';
+		return nodeInstanceId || null;
+	}
+
+	private getDiscourseNodeFiles(): TFile[] {
+		const folder = normalizePath(this._discourseNodesFolderPath || 'discourse_graph_nodes');
+		return this.app.vault.getMarkdownFiles().filter((file) => {
+			if (folder && !file.path.startsWith(`${folder}/`)) return false;
+			return !!this.getDiscourseNodeTypeIdForFile(file);
+		});
+	}
+
+	private async resolveDiscourseNodeFileFromItem(item: DiscourseNodeSidebarItem | PinnedDiscourseNodeItem): Promise<TFile | null> {
+		const itemPath = (item.filePath || '').trim();
+		if (itemPath) {
+			const file = this.app.vault.getAbstractFileByPath(itemPath);
+			if (file instanceof TFile) return file;
+		}
+		return this.resolveDiscourseNodeFileFromTitle(item.title || '', this.app.workspace.getActiveFile()?.path || '');
+	}
+
+	private async resolveDiscourseNodeInstanceIdFromItem(item: DiscourseNodeSidebarItem | PinnedDiscourseNodeItem): Promise<string | null> {
+		const file = await this.resolveDiscourseNodeFileFromItem(item);
+		return this.getDiscourseNodeInstanceIdForFile(file);
+	}
+
+	private getDiscourseNodeFileByInstanceId(nodeInstanceId: string): TFile | null {
+		const id = (nodeInstanceId || '').trim();
+		if (!id) return null;
+		for (const file of this.getDiscourseNodeFiles()) {
+			if (this.getDiscourseNodeInstanceIdForFile(file) === id) return file;
+		}
+		return null;
+	}
+
+	private async loadDiscourseRelationInstances(): Promise<DiscourseRelationInstance[]> {
+		const path = normalizePath('relations.json');
+		try {
+			const stat = await this.app.vault.adapter.stat(path);
+			const mtime = stat?.mtime || 0;
+			if (this._discourseRelationsCache && this._discourseRelationsCache.mtime === mtime) {
+				return this._discourseRelationsCache.relations;
+			}
+			const raw = await this.app.vault.adapter.read(path);
+			const parsed = JSON.parse(raw) as Record<string, unknown>;
+			const relationRecord = parsed.relations && typeof parsed.relations === 'object'
+				? parsed.relations as Record<string, unknown>
+				: {};
+			const relations = Object.values(relationRecord).map((value): DiscourseRelationInstance | null => {
+				if (!value || typeof value !== 'object') return null;
+				const record = value as Record<string, unknown>;
+				const id = typeof record.id === 'string' ? record.id : '';
+				const type = typeof record.type === 'string' ? record.type : '';
+				const source = typeof record.source === 'string' ? record.source : '';
+				const destination = typeof record.destination === 'string' ? record.destination : '';
+				if (!id || !type || !source || !destination) return null;
+				return { id, type, source, destination };
+			}).filter((relation): relation is DiscourseRelationInstance => !!relation);
+			this._discourseRelationsCache = { mtime, relations };
+			return relations;
+		} catch {
+			this._discourseRelationsCache = null;
+			return [];
+		}
+	}
+
+	private async doesDiscourseCanvasNodeMatchItem(
+		canvasFile: TFile,
+		entry: DiscourseCanvasNodeEntry,
+		item: DiscourseNodeSidebarItem | PinnedDiscourseNodeItem
+	): Promise<boolean> {
+		const itemPath = (item.filePath || '').trim();
+		const linkedFile = await this.resolveDiscourseCanvasNodeFile(canvasFile, entry);
+		if (itemPath && linkedFile?.path === itemPath) return true;
+		const itemTitle = (item.title || '').replace(/\s+/g, ' ').trim().toLowerCase();
+		const entryTitle = (entry.title || '').replace(/\s+/g, ' ').trim().toLowerCase();
+		if (itemTitle && entryTitle && itemTitle === entryTitle) return true;
+		if (itemPath && itemTitle && linkedFile?.basename?.replace(/\s+/g, ' ').trim().toLowerCase() === itemTitle) return true;
+		return false;
+	}
+
+	async getRelatedDiscourseNodesForItem(
+		item: DiscourseNodeSidebarItem | PinnedDiscourseNodeItem,
+		limit: number = 6
+	): Promise<RelatedDiscourseNodeSidebarItem[]> {
+		if (!this.settings.enableDiscourseGraphsCompatibility) return [];
+		await this.loadDiscourseConfigIfNeeded();
+		const results = new Map<string, RelatedDiscourseNodeSidebarItem>();
+		const activeNodeInstanceId = await this.resolveDiscourseNodeInstanceIdFromItem(item);
+		if (activeNodeInstanceId) {
+			const relationInstances = await this.loadDiscourseRelationInstances();
+			for (const relation of relationInstances) {
+				const isOutgoing = relation.source === activeNodeInstanceId;
+				const isIncoming = relation.destination === activeNodeInstanceId;
+				if (!isOutgoing && !isIncoming) continue;
+				const relatedInstanceId = isOutgoing ? relation.destination : relation.source;
+				const relatedFile = this.getDiscourseNodeFileByInstanceId(relatedInstanceId);
+				if (!(relatedFile instanceof TFile)) continue;
+				const relatedNodeTypeId = this.getDiscourseNodeTypeIdForFile(relatedFile);
+				if (!relatedNodeTypeId || !this.shouldShowDiscourseNodeType(relatedNodeTypeId)) continue;
+				if (relatedFile.path === item.filePath || relatedFile.path === item.id) continue;
+				const nodeType = this.getDiscourseNodeTypeById(relatedNodeTypeId);
+				const nodeId = relatedFile.path;
+				const direction: RelatedDiscourseNodeSidebarItem['relationDirection'] = isOutgoing ? 'outgoing' : 'incoming';
+				const existing = results.get(nodeId);
+				const target: DiscourseNodeLocateTarget = {
+					id: `related-relation-json:${relation.id}:${relatedFile.path}`,
+					kind: 'markdown-node-link',
+					nodeId,
+					title: relatedFile.basename,
+					filePath: relatedFile.path,
+					nodeTypeId: relatedNodeTypeId,
+					nodeTypeName: nodeType?.name || 'Node',
+					order: existing?.targets.length || 0,
+					label: nodeType?.name || 'Node',
+				};
+				if (existing) {
+					existing.targets.push(target);
+					if (existing.relationDirection !== direction) existing.relationDirection = 'bidirectional';
+				} else {
+					results.set(nodeId, {
+						id: nodeId,
+						title: relatedFile.basename,
+						filePath: relatedFile.path,
+						nodeTypeId: relatedNodeTypeId,
+						nodeTypeName: nodeType?.name || 'Node',
+						nodeTypeColor: nodeType?.color || '',
+						targets: [target],
+						relationDirection: direction,
+					});
+				}
+				if (results.size >= limit) break;
+			}
+		}
+		const canvasFiles = this.app.vault.getMarkdownFiles().filter((file) => this.isLikelyDiscourseCanvasFile(file));
+		for (const canvasFile of canvasFiles) {
+			const model = await this.getDiscourseCanvasModel(canvasFile);
+			if (this.isDiscourseCanvasModelEmpty(model)) continue;
+			const matchingShapeIds = new Set<string>();
+			for (const entry of model.nodes.values()) {
+				if (await this.doesDiscourseCanvasNodeMatchItem(canvasFile, entry, item)) {
+					matchingShapeIds.add(entry.shapeId);
+				}
+			}
+			if (matchingShapeIds.size === 0) continue;
+			const relationCandidates = model.relations.filter((relation) => {
+				return matchingShapeIds.has(relation.fromShapeId) || matchingShapeIds.has(relation.toShapeId);
+			});
+			const semanticRelations = relationCandidates.filter((relation) => relation.kind === 'discourse');
+			for (const relation of semanticRelations.length > 0 ? semanticRelations : relationCandidates) {
+				const isOutgoing = matchingShapeIds.has(relation.fromShapeId);
+				const isIncoming = matchingShapeIds.has(relation.toShapeId);
+				if (!isOutgoing && !isIncoming) continue;
+				const relatedShapeId = isOutgoing ? relation.toShapeId : relation.fromShapeId;
+				const relatedEntry = model.nodes.get(relatedShapeId);
+				if (!relatedEntry?.nodeTypeId || !this.shouldShowDiscourseNodeType(relatedEntry.nodeTypeId)) continue;
+				const linkedFile = await this.resolveDiscourseCanvasNodeFile(canvasFile, relatedEntry);
+				const nodeType = this.getDiscourseNodeTypeById(relatedEntry.nodeTypeId);
+				const nodeId = linkedFile?.path || `${canvasFile.path}::${relatedEntry.shapeId}`;
+				if (nodeId === item.id || linkedFile?.path === item.filePath) continue;
+				const direction: RelatedDiscourseNodeSidebarItem['relationDirection'] = isOutgoing ? 'outgoing' : 'incoming';
+				const existing = results.get(nodeId);
+				const target: DiscourseNodeLocateTarget = {
+					id: `related-canvas-node:${canvasFile.path}:${relatedEntry.shapeId}`,
+					kind: 'canvas-discourse-node',
+					nodeId,
+					title: linkedFile?.basename || relatedEntry.title || 'Untitled node',
+					filePath: linkedFile?.path || null,
+					nodeTypeId: relatedEntry.nodeTypeId,
+					nodeTypeName: nodeType?.name || 'Node',
+					order: existing?.targets.length || 0,
+					label: nodeType?.name || 'Node',
+					shapeId: relatedEntry.shapeId,
+					pageId: relatedEntry.pageId,
+				};
+				if (existing) {
+					existing.targets.push(target);
+					if (existing.relationDirection !== direction) existing.relationDirection = 'bidirectional';
+					continue;
+				}
+				results.set(nodeId, {
+					id: nodeId,
+					title: target.title,
+					filePath: target.filePath,
+					nodeTypeId: target.nodeTypeId,
+					nodeTypeName: target.nodeTypeName,
+					nodeTypeColor: nodeType?.color || '',
+					targets: [target],
+					relationDirection: direction,
+				});
+				if (results.size >= limit) break;
+			}
+			if (results.size >= limit) break;
+		}
+		return Array.from(results.values()).slice(0, limit);
 	}
 
 	private async locateMarkdownNodeTarget(file: TFile, target: DiscourseNodeLocateTarget): Promise<boolean> {
@@ -2867,6 +3553,7 @@ export default class ZotsidianPlugin extends Plugin {
 			this._baseHoverCardEl.remove();
 			this._baseHoverCardEl = null;
 		}
+		this._baseHoverCardInteractive = false;
 		this._baseHoverTargetEl = null;
 		this._baseHoverRootEl = null;
 	}
@@ -2878,7 +3565,7 @@ export default class ZotsidianPlugin extends Plugin {
 		}
 		this._baseHoverHideTimer = window.setTimeout(() => {
 			this.hideBaseHoverCard();
-		}, 90);
+		}, 160);
 	}
 
 	private normalizeHoverText(value: string): string {
@@ -3333,17 +4020,29 @@ export default class ZotsidianPlugin extends Plugin {
 		this.hideBaseHoverCard();
 		const card = createCitationHoverCardElement(this, citekey);
 		card.classList.add('zotsidian-base-hover-card');
-		card.addEventListener('mouseenter', () => {
+		const markInteractive = () => {
+			this._baseHoverCardInteractive = true;
 			if (this._baseHoverHideTimer != null) {
 				window.clearTimeout(this._baseHoverHideTimer);
 				this._baseHoverHideTimer = null;
 			}
-		});
-		card.addEventListener('mouseleave', () => {
+			this.clearBaseHoverSwitchTimer();
+		};
+		const markInactive = () => {
+			this._baseHoverCardInteractive = false;
 			this.scheduleHideBaseHoverCard();
-		});
+		};
+		card.addEventListener('mouseenter', markInteractive);
+		card.addEventListener('pointerenter', markInteractive);
+		card.addEventListener('mouseleave', markInactive);
+		card.addEventListener('pointerleave', markInactive);
+		card.addEventListener('mousedown', (event) => event.stopPropagation());
+		card.addEventListener('pointerdown', (event) => event.stopPropagation());
+		card.addEventListener('click', (event) => event.stopPropagation());
+		card.addEventListener('wheel', (event) => event.stopPropagation());
 		document.body.appendChild(card);
 		this._baseHoverCardEl = card;
+		this._baseHoverCardInteractive = false;
 		this._baseHoverTargetEl = target;
 		this._baseHoverRootEl = root;
 		this.positionBaseHoverCard(card, target, root);
@@ -3632,6 +4331,10 @@ export default class ZotsidianPlugin extends Plugin {
 			getRoot: (targetLeaf) => this.getBaseViewRoot(targetLeaf),
 			resolveHoveredText: (targetLeaf, targetFilePath, root) => this.resolveHoveredDiscourseTextFromStore(targetLeaf, targetFilePath, root),
 			hideHoverCard: () => this.hideBaseHoverCard(),
+			shouldKeepHoverCardAlive: () => {
+				if (!this._baseHoverCardEl?.isConnected) return false;
+				return this._baseHoverCardInteractive || this._baseHoverCardEl.matches(':hover');
+			},
 			isCurrentHoverTarget: (anchor, root) => this._baseHoverTargetEl === anchor && !!this._baseHoverCardEl?.isConnected && this._baseHoverRootEl === root,
 			hasConnectedHoverCard: () => !!(this._baseHoverCardEl?.isConnected && this._baseHoverTargetEl),
 			positionCurrentHoverCard: (anchor, root) => {
@@ -3767,14 +4470,118 @@ export default class ZotsidianPlugin extends Plugin {
 		return normalized;
 	}
 
+	normalizeSourceFrontmatterMode(value: string | null | undefined): SourceFrontmatterMode {
+		return normalizeSourceFrontmatterMode(value);
+	}
+
+	normalizeSourcePagePreset(value: string | null | undefined): SourcePagePreset {
+		return normalizeSourcePagePreset(value);
+	}
+
+	normalizeSourceManagedSectionMode(value: string | null | undefined): SourceManagedSectionMode {
+		return normalizeSourceManagedSectionMode(value);
+	}
+
+	normalizeAnnotationTemplatePreset(value: string | null | undefined): AnnotationTemplatePreset {
+		return normalizeAnnotationTemplatePreset(value);
+	}
+
+	normalizeAnnotationTextCopyFormat(value: string | null | undefined): AnnotationTextCopyFormat {
+		if (value === 'markdown' || value === 'callout' || value === 'plain' || value === 'current-template') return value;
+		return 'markdown-link';
+	}
+
+	normalizeAnnotationImageCopyFormat(value: string | null | undefined): AnnotationImageCopyFormat {
+		if (value === 'image-markdown' || value === 'markdown-link' || value === 'callout' || value === 'current-template') return value;
+		return 'image';
+	}
+
 	private getConfiguredSourceNotesFolder(): string {
 		return this.normalizeSourceNotesFolderSetting(this.settings.sourceNotesFolderPath);
+	}
+
+	private getSourceFrontmatterMode(): SourceFrontmatterMode {
+		return this.normalizeSourceFrontmatterMode(this.settings.sourceFrontmatterMode);
+	}
+
+	getSourcePagePreset(): SourcePagePreset {
+		return this.normalizeSourcePagePreset(this.settings.sourcePagePreset);
+	}
+
+	private getSourceManagedLayout(): {
+		annotations: SourceManagedSectionMode;
+		related: SourceManagedSectionMode;
+		references: SourceManagedSectionMode;
+		citations: SourceManagedSectionMode;
+	} {
+		return {
+			annotations: this.normalizeSourceManagedSectionMode(this.settings.sourceAnnotationsMode),
+			related: 'off',
+			references: 'off',
+			citations: 'off',
+		};
+	}
+
+	applySourcePagePresetDefaults(preset: SourcePagePreset): void {
+		switch (preset) {
+			case 'minimal':
+				this.settings.sourceAnnotationsMode = 'off';
+				this.settings.sourceRelatedMode = 'off';
+				this.settings.sourceReferencesMode = 'off';
+				this.settings.sourceCitationsMode = 'off';
+				break;
+			case 'review':
+				this.settings.sourceAnnotationsMode = 'managed';
+				this.settings.sourceRelatedMode = 'off';
+				this.settings.sourceReferencesMode = 'off';
+				this.settings.sourceCitationsMode = 'off';
+				break;
+			case 'custom':
+				break;
+			case 'reading':
+			default:
+				this.settings.sourceAnnotationsMode = 'managed';
+				this.settings.sourceRelatedMode = 'off';
+				this.settings.sourceReferencesMode = 'off';
+				this.settings.sourceCitationsMode = 'off';
+				break;
+		}
 	}
 
 	private buildSourceNotePath(citekey: string, folderOverride?: string | null): string {
 		const key = citekey.replace(/^@+/, '').trim();
 		const folder = this.normalizeSourceNotesFolderSetting(folderOverride ?? this.getConfiguredSourceNotesFolder());
 		return folder ? normalizePath(`${folder}/@${key}.md`) : normalizePath(`@${key}.md`);
+	}
+
+	private async loadEffectiveSourceFullNoteTemplateDocument(): Promise<{ frontmatterDefaults: Record<string, unknown>; body: string }> {
+		const preset = this.getSourcePagePreset();
+		if (preset !== 'custom') {
+			return {
+				frontmatterDefaults: {},
+				body: getBuiltInSourceFullNoteTemplate(preset, this.getSourceManagedLayout()),
+			};
+		}
+		return await loadSourceFullNoteTemplateDocument(
+			getConfiguredTemplatePath(this.settings, 'source-full-note'),
+			(templatePath) => this.app.vault.adapter.read(templatePath)
+		);
+	}
+
+	private async loadEffectiveSourceBodyTemplate(): Promise<string> {
+		if (this.getSourcePagePreset() !== 'custom') return '';
+		return await loadSourceBodyTemplate(
+			getConfiguredTemplatePath(this.settings, 'source-body'),
+			(templatePath) => this.app.vault.adapter.read(templatePath)
+		);
+	}
+
+	private async loadEffectiveSourceTemplateDefaults(): Promise<Record<string, unknown>> {
+		if (this.getSourcePagePreset() !== 'custom') return {};
+		return await loadSourceTemplateDefaults(
+			getConfiguredTemplatePath(this.settings, 'source-frontmatter'),
+			(templatePath) => this.app.vault.adapter.read(templatePath)
+		);
 	}
 
 	private resolveSourceNoteFile(citekey: string): TFile | null {
@@ -4598,11 +5405,20 @@ export default class ZotsidianPlugin extends Plugin {
 
 		let file = this.app.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile)) {
-			const initial = `---\n---\n\n# @${key}\n`;
+			const bodyTemplate = await this.loadEffectiveSourceBodyTemplate();
+			const fullNoteTemplateDocument = await this.loadEffectiveSourceFullNoteTemplateDocument();
+			const initial = buildInitialSourcePageContent(
+				key,
+				title,
+				this.citationFrontmatterPatch(key, title, citationRaw),
+				bodyTemplate,
+				fullNoteTemplateDocument.body
+			);
 			file = await this.app.vault.create(path, initial);
 		}
 		if (file instanceof TFile) {
 			await this.applySourceFrontmatter(file, key, title, citationRaw);
+			await this.syncSourceNoteManagedBlocksIfPresent(file, key, citationRaw);
 			this.invalidateHoverCacheForCitekey(key);
 			return file;
 		}
@@ -4614,6 +5430,7 @@ export default class ZotsidianPlugin extends Plugin {
 		if (!file) return;
 		const leaf = this.app.workspace.getLeaf(false);
 		await leaf.openFile(file);
+		await this.syncSourceNoteManagedBlocksForFileIfApplicable(file);
 	}
 
 	async getCitationHoverData(scopePath: string, citekey: string): Promise<CitationHoverData | null> {
@@ -4730,25 +5547,32 @@ export default class ZotsidianPlugin extends Plugin {
 
 	private async applySourceFrontmatter(file: TFile, citekey: string, title: string, raw?: Record<string, unknown>): Promise<void> {
 		await this.loadDiscourseConfigIfNeeded();
-		const defaults = await this.loadSourceTemplateDefaults();
+		const frontmatterMode = this.getSourceFrontmatterMode();
+		const fullNoteTemplateDocument = await this.loadEffectiveSourceFullNoteTemplateDocument();
+		const templateDefaults = await this.loadEffectiveSourceTemplateDefaults();
+		const defaults = getSourceFrontmatterDefaults(frontmatterMode, {
+			...fullNoteTemplateDocument.frontmatterDefaults,
+			...templateDefaults,
+		});
 		const citationPatch = this.citationFrontmatterPatch(citekey, title, raw);
+		const requiredPatch = getRequiredSourceFrontmatterPatch(citekey, title, citationPatch);
+		const discoursePatch = getDiscourseSourceFrontmatterPatch(this._discourseSourceNodeTypeId);
 		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
 			for (const [k, v] of Object.entries(defaults)) {
 				if (frontmatter[k] === undefined || frontmatter[k] === null || frontmatter[k] === '') {
 					frontmatter[k] = v;
 				}
 			}
-			for (const [k, v] of Object.entries(citationPatch)) {
+			for (const [k, v] of Object.entries(requiredPatch)) {
 				if (frontmatter[k] === undefined || frontmatter[k] === null || frontmatter[k] === '') {
 					frontmatter[k] = v;
 				}
 			}
-			if (this._discourseSourceNodeTypeId && !frontmatter.nodeTypeId) frontmatter.nodeTypeId = this._discourseSourceNodeTypeId;
-			if (!frontmatter.dg_type) frontmatter.dg_type = 'Source';
-			if (!frontmatter.citekey) frontmatter.citekey = citekey;
-			if (title && !frontmatter.title) frontmatter.title = title;
-			if (!Array.isArray(frontmatter.tags)) frontmatter.tags = ['dg/source'];
-			else if (!frontmatter.tags.includes('dg/source')) frontmatter.tags.push('dg/source');
+			for (const [k, v] of Object.entries(discoursePatch)) {
+				if (frontmatter[k] === undefined || frontmatter[k] === null || frontmatter[k] === '') {
+					frontmatter[k] = v;
+				}
+			}
 		});
 	}
 
@@ -4796,6 +5620,252 @@ export default class ZotsidianPlugin extends Plugin {
 		return [...this._discourseNodeTypes];
 	}
 
+	private normalizePinnedDiscourseNodes(value: unknown): PinnedDiscourseNodeItem[] {
+		if (!Array.isArray(value)) return [];
+		const seen = new Set<string>();
+		const pins: PinnedDiscourseNodeItem[] = [];
+		for (const raw of value) {
+			if (!raw || typeof raw !== 'object') continue;
+			const item = raw as Record<string, unknown>;
+			const id = typeof item.id === 'string' ? item.id : '';
+			const title = typeof item.title === 'string' ? item.title : '';
+			if (!id || !title || seen.has(id)) continue;
+			seen.add(id);
+			pins.push({
+				id,
+				title,
+				filePath: typeof item.filePath === 'string' ? item.filePath : null,
+				nodeTypeId: typeof item.nodeTypeId === 'string' ? item.nodeTypeId : null,
+				nodeTypeName: typeof item.nodeTypeName === 'string' ? item.nodeTypeName : 'Node',
+				nodeTypeColor: typeof item.nodeTypeColor === 'string' ? item.nodeTypeColor : '',
+				pinnedAt: typeof item.pinnedAt === 'number' ? item.pinnedAt : Date.now(),
+			});
+		}
+		return pins;
+	}
+
+	getPinnedDiscourseNodes(): PinnedDiscourseNodeItem[] {
+		return this.normalizePinnedDiscourseNodes(this.settings.pinnedDiscourseNodes);
+	}
+
+	isDiscourseNodePinned(nodeId: string): boolean {
+		return this.getPinnedDiscourseNodes().some((item) => item.id === nodeId);
+	}
+
+	async togglePinnedDiscourseNode(item: DiscourseNodeSidebarItem | PinnedDiscourseNodeItem): Promise<boolean> {
+		const pins = this.getPinnedDiscourseNodes();
+		const existing = pins.findIndex((pin) => pin.id === item.id);
+		if (existing >= 0) {
+			pins.splice(existing, 1);
+			this.settings.pinnedDiscourseNodes = pins;
+			await this.saveSettings();
+			return false;
+		}
+		pins.unshift({
+			id: item.id,
+			title: item.title,
+			filePath: item.filePath,
+			nodeTypeId: item.nodeTypeId,
+			nodeTypeName: item.nodeTypeName || 'Node',
+			nodeTypeColor: item.nodeTypeColor || '',
+			pinnedAt: Date.now(),
+		});
+		this.settings.pinnedDiscourseNodes = pins;
+		await this.saveSettings();
+		return true;
+	}
+
+	async unpinPinnedDiscourseNode(nodeId: string): Promise<boolean> {
+		const normalizedId = (nodeId || '').trim();
+		if (!normalizedId) return false;
+		const pins = this.getPinnedDiscourseNodes();
+		const nextPins = pins.filter((pin) => pin.id !== normalizedId);
+		if (nextPins.length === pins.length) return false;
+		this.settings.pinnedDiscourseNodes = nextPins;
+		await this.saveSettings();
+		return true;
+	}
+
+	private createTldrawShapeId(): string {
+		return `shape:${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-6)}`;
+	}
+
+	private createTldrawIndexKey(): string {
+		return `a${Math.random().toString(36).slice(2, 7)}`;
+	}
+
+	private createDiscourseBlockRefId(): string {
+		if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+			return crypto.randomUUID();
+		}
+		const segment = () => Math.random().toString(16).slice(2, 6);
+		return `${segment()}${segment()}-${segment()}-${segment()}-${segment()}-${segment()}${segment()}${segment()}`;
+	}
+
+	private buildDiscourseNodeCanvasReferenceTitle(title: string): string {
+		return (title || 'Untitled discourse node')
+			.replace(/[\[\]]/g, '')
+			.replace(/\s+/g, ' ')
+			.trim();
+	}
+
+	private async appendDiscourseCanvasBlockReference(file: TFile, title: string, blockRefId: string): Promise<void> {
+		const referenceTitle = this.buildDiscourseNodeCanvasReferenceTitle(title);
+		if (!referenceTitle || !blockRefId) return;
+		const blockReference = `[[${referenceTitle}]]\n^${blockRefId}`;
+		await this.app.vault.process(file, (data) => {
+			if (data.includes(`^${blockRefId}`)) return data;
+			return `${data.trimEnd()}\n\n${blockReference}\n`;
+		});
+	}
+
+	private getDiscourseCanvasLeafAndFileFromPoint(clientX: number, clientY: number): { leaf: WorkspaceLeaf; file: TFile; root: HTMLElement } | null {
+		if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+		const target = document.elementFromPoint(clientX, clientY);
+		if (!(target instanceof HTMLElement)) return null;
+		const leaves = new Set<WorkspaceLeaf>();
+		const activeLeaf = this.app.workspace.activeLeaf;
+		const recentLeaf = this.app.workspace.getMostRecentLeaf();
+		if (activeLeaf) leaves.add(activeLeaf);
+		if (recentLeaf) leaves.add(recentLeaf);
+		for (const leaf of this.app.workspace.getLeavesOfType('tldraw-dg-preview')) {
+			leaves.add(leaf);
+		}
+		for (const leaf of leaves) {
+			const file = this.getLeafFile(leaf);
+			if (!(file instanceof TFile) || !this.isDiscourseCanvasLeaf(leaf)) continue;
+			const root = this.getBaseViewRoot(leaf);
+			if (!(root instanceof HTMLElement) || !root.contains(target)) continue;
+			return { leaf, file, root };
+		}
+		return null;
+	}
+
+	isDiscourseCanvasPoint(clientX: number, clientY: number): boolean {
+		return !!this.getDiscourseCanvasLeafAndFileFromPoint(clientX, clientY);
+	}
+
+	async insertCitationAsDiscourseSourceNodeAtPoint(
+		citekey: string,
+		clientX: number,
+		clientY: number,
+	): Promise<boolean> {
+		const normalized = this.normalizeCitekeyForInsert(citekey);
+		if (!normalized) return false;
+		await this.loadDiscourseConfigIfNeeded();
+		const sourceNodeTypeId = this._discourseSourceNodeTypeId || '';
+		const sourceNodeType = this.getDiscourseNodeTypeById(sourceNodeTypeId);
+		if (!sourceNodeTypeId) {
+			new Notice('Could not determine the Discourse Graph Source node type.');
+			return false;
+		}
+		const sourceFile = this.findSourceNoteFile(normalized);
+		return this.insertDiscourseNodeMarkdownAtPoint({
+			id: `source:${normalized}`,
+			title: `@${normalized}`,
+			filePath: sourceFile?.path || null,
+			nodeTypeId: sourceNodeTypeId,
+			nodeTypeName: sourceNodeType?.name || 'Source',
+			nodeTypeColor: sourceNodeType?.color || '',
+			targets: [],
+		}, clientX, clientY);
+	}
+
+	private estimateDiscourseNodeWidth(title: string): number {
+		const normalized = title.replace(/\s+/g, ' ').trim();
+		if (normalized.length <= 30) return 280;
+		return Math.max(300, Math.min(520, normalized.length * 8.8));
+	}
+
+	private estimateDiscourseNodeHeight(title: string, width: number): number {
+		const normalized = title.replace(/\s+/g, ' ').trim();
+		const approxCharsPerLine = Math.max(20, Math.floor(width / 11));
+		const lines = Math.max(1, Math.ceil(normalized.length / approxCharsPerLine));
+		return Math.max(76, Math.min(220, lines * 30 + 28));
+	}
+
+	async insertDiscourseNodeMarkdownAtPoint(
+		item: DiscourseNodeSidebarItem | PinnedDiscourseNodeItem,
+		clientX: number,
+		clientY: number,
+	): Promise<boolean> {
+		const context = this.getDiscourseCanvasLeafAndFileFromPoint(clientX, clientY);
+		if (!context) return false;
+		const store = getDiscourseViewStore(context.leaf);
+		if (!store || typeof store.put !== 'function') return false;
+		const model = await this.getDiscourseCanvasModel(context.file);
+		const pageId = getDiscourseStoreCurrentPageId(context.leaf)
+			|| getDiscourseCanvasActivePageId(context.root, model)
+			|| model.currentPageId
+			|| 'page:page';
+		const viewport = getDiscourseCanvasViewport(context.root);
+		const rect = viewport.getBoundingClientRect();
+		if (!rect.width || !rect.height) return false;
+		const camera = getDiscourseStoreCameraRecord(context.leaf, pageId);
+		const cameraX = typeof camera?.x === 'number' ? camera.x : 0;
+		const cameraY = typeof camera?.y === 'number' ? camera.y : 0;
+		const zoom = typeof camera?.z === 'number' && camera.z > 0 ? camera.z : 1;
+		const title = (item.title || 'Untitled discourse node').replace(/\s+/g, ' ').trim();
+		const nodeTypeId = item.nodeTypeId || this._discourseNodeTypes[0]?.id || '';
+		if (!nodeTypeId) {
+			new Notice('Could not determine a discourse node type for this pinned node.');
+			return false;
+		}
+		const shapeId = this.createTldrawShapeId();
+		const blockRefId = this.createDiscourseBlockRefId();
+		const x = (clientX - rect.left) / zoom - cameraX;
+		const y = (clientY - rect.top) / zoom - cameraY;
+		const width = this.estimateDiscourseNodeWidth(title);
+		const height = this.estimateDiscourseNodeHeight(title, width);
+		const discourseNodeShape = {
+			id: shapeId,
+			typeName: 'shape',
+			type: 'discourse-node',
+			parentId: pageId,
+			index: this.createTldrawIndexKey(),
+			x,
+			y,
+			rotation: 0,
+			isLocked: false,
+			opacity: 1,
+			meta: {},
+			props: {
+				w: width,
+				h: height,
+				src: `asset:obsidian.blockref.${blockRefId}`,
+				title,
+				nodeTypeId,
+				size: 'm',
+				fontFamily: 'draw',
+			},
+		};
+		const pageState = getDiscourseStorePageStateRecord(context.leaf, pageId);
+		const nextRecords: Record<string, unknown>[] = [discourseNodeShape];
+		if (pageState) {
+			nextRecords.push({
+				...pageState,
+				selectedShapeIds: [shapeId],
+				editingShapeId: null,
+				hoveredShapeId: null,
+			});
+		}
+		try {
+			if (typeof store.atomic === 'function') {
+				store.atomic(() => store.put?.(nextRecords));
+			} else {
+				store.put(nextRecords);
+			}
+			await this.appendDiscourseCanvasBlockReference(context.file, title, blockRefId);
+			await this.setSidebarFocusedDiscourseNodes([item.id], context.file.path, 'canvas-selection');
+			new Notice('Discourse node added to canvas.');
+			return true;
+		} catch (err) {
+			console.error('Failed to add discourse node to canvas', err);
+			new Notice('Could not add this node to the discourse canvas.');
+			return false;
+		}
+	}
+
 	private getDiscourseNodeTypeById(nodeTypeId: string | null | undefined): DiscourseNodeTypeInfo | null {
 		if (typeof nodeTypeId !== 'string' || !nodeTypeId) return null;
 		return this._discourseNodeTypes.find((nodeType) => nodeType.id === nodeTypeId) || null;
@@ -4806,38 +5876,6 @@ export default class ZotsidianPlugin extends Plugin {
 		if (selectedIds.length === 0) return true;
 		if (typeof nodeTypeId !== 'string' || !nodeTypeId) return false;
 		return selectedIds.includes(nodeTypeId);
-	}
-
-	private async loadSourceTemplateDefaults(): Promise<Record<string, unknown>> {
-		const defaults: Record<string, unknown> = {
-			dg_type: 'Source',
-			status: 'seed',
-			keywords: '',
-			rating: 3,
-			tags: ['dg/source'],
-		};
-		try {
-			const configuredPath = (this.settings.sourceTemplatePath || '').trim();
-			if (!configuredPath) return defaults;
-			const path = normalizePath(configuredPath);
-			const content = await this.app.vault.adapter.read(path);
-			const match = content.match(/^---\n([\s\S]*?)\n---/);
-			if (!match) return defaults;
-			for (const line of match[1].split('\n')) {
-				const m = line.match(/^\s*([A-Za-z0-9_]+)\s*:\s*(.*)\s*$/);
-				if (!m) continue;
-				const key = m[1];
-				const raw = m[2];
-				if (raw === '""' || raw === "''") defaults[key] = '';
-				else if (raw.startsWith('[') && raw.endsWith(']')) {
-					defaults[key] = raw.slice(1, -1).split(',').map((x) => x.trim()).filter(Boolean).map((x) => x.replace(/^['\"]|['\"]$/g, ''));
-				} else if (!Number.isNaN(Number(raw)) && raw !== '') defaults[key] = Number(raw);
-				else defaults[key] = raw.replace(/^['\"]|['\"]$/g, '');
-			}
-		} catch (_err) {
-			// ignore
-		}
-		return defaults;
 	}
 
 	private async tryBootstrapDiscourseSource(file: TFile): Promise<void> {
@@ -4866,6 +5904,189 @@ export default class ZotsidianPlugin extends Plugin {
 		const scope = this.resolveScopeFromFrontmatter(cache?.frontmatter as Record<string, unknown> | undefined);
 		const lookup = await this.getCitationMapFor(scope, [key]);
 		await this.applySourceFrontmatter(targetFile, key, '', lookup.get(key));
+		await this.syncSourceNoteManagedBlocksIfPresent(targetFile, key, lookup.get(key));
+	}
+
+	private async syncSourceNoteManagedBlocksIfPresent(file: TFile, citekey: string, raw?: Record<string, unknown>): Promise<void> {
+		if (!file || file.extension !== 'md') return;
+		let currentContent = await this.app.vault.read(file);
+		let createMissingAnnotationsBlock = false;
+		if (!hasAnyManagedBlock(currentContent, ['annotations'])) {
+			if (this.normalizeSourceManagedSectionMode(this.settings.sourceAnnotationsMode) !== 'managed') return;
+			createMissingAnnotationsBlock = true;
+		}
+		const effectiveRaw = this.enrichRawWithSourceInfo(citekey, raw || {});
+		const cache = this.app.metadataCache.getFileCache(file);
+		const scope = this.resolveScopeFromFrontmatter(cache?.frontmatter as Record<string, unknown> | undefined);
+		const hint = normalizeAttachmentHint(effectiveRaw, citekey, this.settings.zoteroDataDir || '');
+		const attachmentLoad = await loadSourceManagedAttachmentRows(citekey, scope, hint);
+		if (attachmentLoad.error) {
+			console.warn(`Zotsidian: source annotations refresh skipped for @${citekey}: ${attachmentLoad.error}`);
+			return;
+		}
+		const loadedAnnotationCount = attachmentLoad.rows.reduce((count, row) => count + row.annotations.length, 0);
+		if (loadedAnnotationCount === 0 && /\[Open in Zotero · [A-Z0-9]+\]\(/i.test(currentContent)) {
+			console.warn(`Zotsidian: source annotations refresh skipped for @${citekey}: Zotero returned no annotations while the source page already has annotations.`);
+			return;
+		}
+		const annotationTextTemplate = await this.loadAnnotationTemplateContent('text');
+		const annotationImageTemplate = await this.loadAnnotationTemplateContent('image');
+		await syncSourceNoteManagedBlocks(file, {
+			annotations: attachmentLoad.rows,
+			related: null,
+		}, {
+			annotationTextTemplate,
+			annotationImageTemplate,
+		}, {
+			read: (target) => this.app.vault.read(target),
+			modify: (target, content) => this.app.vault.modify(target, content),
+		}, currentContent, { createMissingAnnotationsBlock });
+	}
+
+	private async loadAnnotationTemplateContent(kind: 'text' | 'image'): Promise<string> {
+		try {
+			const preset = this.normalizeAnnotationTemplatePreset(this.settings.annotationTemplatePreset);
+			if (preset !== 'custom') {
+				return getBuiltInAnnotationTemplate(preset, kind);
+			}
+			const configuredPath = getConfiguredTemplatePath(
+				this.settings,
+				kind === 'image' ? 'annotation-image' : 'annotation-text'
+			);
+			if (!configuredPath) return '';
+			return await this.app.vault.adapter.read(configuredPath);
+		} catch (_err) {
+			return '';
+		}
+	}
+
+	private async syncSourceNoteManagedBlocksForFileIfApplicable(file: TFile | null): Promise<void> {
+		if (!(file instanceof TFile) || file.extension !== 'md') return;
+		if (!file.basename.startsWith('@')) return;
+		const citekey = file.basename.replace(/^@+/, '').trim();
+		if (!citekey) return;
+		const sourceFile = this.findSourceNoteFile(citekey);
+		if (!(sourceFile instanceof TFile)) return;
+		const cache = this.app.metadataCache.getFileCache(sourceFile);
+		const scope = this.resolveScopeFromFrontmatter(cache?.frontmatter as Record<string, unknown> | undefined);
+		const lookup = await this.getCitationMapFor(scope, [citekey]).catch(() => new Map<string, Record<string, unknown>>());
+		await this.syncSourceNoteManagedBlocksIfPresent(sourceFile, citekey, lookup.get(citekey));
+	}
+
+	private async getActiveSourceNoteContext(): Promise<{
+		file: TFile;
+		citekey: string;
+		raw: Record<string, unknown>;
+	} | null> {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || file.extension !== 'md' || !file.basename.startsWith('@')) return null;
+		const citekey = file.basename.replace(/^@+/, '').trim();
+		if (!citekey) return null;
+		const cache = this.app.metadataCache.getFileCache(file);
+		const scope = this.resolveScopeFromFrontmatter(cache?.frontmatter as Record<string, unknown> | undefined);
+		const lookup = await this.getCitationMapFor(scope, [citekey]).catch(() => new Map<string, Record<string, unknown>>());
+		return {
+			file,
+			citekey,
+			raw: lookup.get(citekey) || {},
+		};
+	}
+
+	private extractManagedBlockMarkup(content: string, section: SourceManagedBlockSection): string {
+		const markers = getSourceManagedBlockMarkers(section);
+		const heading = getSourceManagedBlockHeading(section);
+		const pattern = new RegExp(
+			[
+				`${this.escapeRegExp(markers.begin)}[\\s\\S]*?${this.escapeRegExp(markers.end)}`,
+				`^${this.escapeRegExp(heading)}\\s*$[\\s\\S]*?(?=^##\\s+|\\Z)`,
+			].join('|'),
+			'm'
+		);
+		const matched = content.match(pattern);
+		return matched?.[0]?.trim() || '';
+	}
+
+	private escapeRegExp(value: string): string {
+		return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	}
+
+	private buildDefaultManagedBlockSeed(section: SourceManagedBlockSection): string {
+		return wrapSourceManagedBlock(section, getSourceManagedBlockHeading(section));
+	}
+
+	private async buildManagedBlockMigrationSeeds(
+		citekey: string,
+		raw: Record<string, unknown>,
+		sections: SourceManagedBlockSection[]
+	): Promise<Map<SourceManagedBlockSection, string>> {
+		const seeds = new Map<SourceManagedBlockSection, string>();
+		const fullNoteTemplateDocument = await this.loadEffectiveSourceFullNoteTemplateDocument();
+		const renderedTemplate = fullNoteTemplateDocument.body
+			? buildInitialSourcePageContent(
+				citekey,
+				typeof raw.title === 'string' ? raw.title : `@${citekey}`,
+				raw,
+				'',
+				fullNoteTemplateDocument.body
+			)
+			: '';
+
+		for (const section of sections) {
+			const fromTemplate = renderedTemplate
+				? this.extractManagedBlockMarkup(renderedTemplate, section)
+				: '';
+			seeds.set(section, fromTemplate || this.buildDefaultManagedBlockSeed(section));
+		}
+		return seeds;
+	}
+
+	private async getManagedBlockMigrationTargetSections(
+		citekey: string,
+		raw: Record<string, unknown>
+	): Promise<SourceManagedBlockSection[]> {
+		const configurableSections: SourceManagedBlockSection[] = ['annotations', 'related', 'references', 'citations'];
+		const fullNoteTemplateDocument = await this.loadEffectiveSourceFullNoteTemplateDocument();
+		if (fullNoteTemplateDocument.body) {
+			try {
+				const renderedTemplate = buildInitialSourcePageContent(
+					citekey,
+					typeof raw.title === 'string' ? raw.title : `@${citekey}`,
+					raw,
+					'',
+					fullNoteTemplateDocument.body
+				);
+				const declared = configurableSections.filter((section) => !!this.extractManagedBlockMarkup(renderedTemplate, section));
+				if (declared.length > 0) return declared;
+			} catch (_err) {
+				// Fall back to the minimal preset below.
+			}
+		}
+		return ['annotations', 'related'];
+	}
+
+	private async migrateActiveSourceNoteToManagedBlocks(): Promise<void> {
+		const context = await this.getActiveSourceNoteContext();
+		if (!context) {
+			new Notice('Open an @citekey source note first.');
+			return;
+		}
+		const current = await this.app.vault.read(context.file);
+		const sections = await this.getManagedBlockMigrationTargetSections(context.citekey, context.raw);
+		const missing = sections.filter((section) => !this.extractManagedBlockMarkup(current, section));
+		if (missing.length === 0) {
+			new Notice('This source note already contains all managed blocks.');
+			await this.syncSourceNoteManagedBlocksIfPresent(context.file, context.citekey, context.raw);
+			return;
+		}
+		const seeds = await this.buildManagedBlockMigrationSeeds(context.citekey, context.raw, missing);
+		const appended = missing
+			.map((section) => seeds.get(section)?.trim() || '')
+			.filter(Boolean)
+			.join('\n\n');
+		const next = `${current.trimEnd()}\n\n${appended}\n`;
+		await this.app.vault.modify(context.file, next);
+		await this.syncSourceNoteManagedBlocksIfPresent(context.file, context.citekey, context.raw);
+		new Notice(`Inserted managed blocks: ${missing.join(', ')}.`);
 	}
 
 	async onload() {
@@ -4899,6 +6120,14 @@ export default class ZotsidianPlugin extends Plugin {
 			}
 		});
 
+		this.addCommand({
+			id: 'migrate-active-source-note-to-managed-blocks',
+			name: 'Zotsidian: Insert managed blocks into active source note',
+			callback: async () => {
+				await this.migrateActiveSourceNoteToManagedBlocks();
+			}
+		});
+
 		this.registerEvent(this.app.workspace.on('file-open', async (file: TFile | null) => {
 			if (!file) {
 				this.syncActiveBaseViewSupport(this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf());
@@ -4906,6 +6135,7 @@ export default class ZotsidianPlugin extends Plugin {
 				return;
 			}
 			await this.tryBootstrapDiscourseSource(file);
+			await this.syncSourceNoteManagedBlocksForFileIfApplicable(file);
 			this.syncActiveBaseViewSupport(this.app.workspace.activeLeaf ?? this.app.workspace.getMostRecentLeaf());
 			await this.setActiveFilePath(file.path);
 			await this.syncActiveMarkdownLineContext();
@@ -4992,6 +6222,14 @@ export default class ZotsidianPlugin extends Plugin {
 			window.clearTimeout(this._persistDataTimer);
 			this._persistDataTimer = null;
 		}
+		if (this._discourseSelectionSyncTimer != null) {
+			window.clearTimeout(this._discourseSelectionSyncTimer);
+			this._discourseSelectionSyncTimer = null;
+		}
+		if (this._discourseStatePollTimer != null) {
+			window.clearInterval(this._discourseStatePollTimer);
+			this._discourseStatePollTimer = null;
+		}
 		this.clearBaseViewObserver();
 		this.hideBaseHoverCard();
 		// keep custom view attached per Obsidian plugin guidelines
@@ -5016,6 +6254,15 @@ export default class ZotsidianPlugin extends Plugin {
 		if (!['auto', 'semantic-scholar', 'openalex'].includes(this.settings.relatedPapersProvider)) {
 			this.settings.relatedPapersProvider = 'auto';
 		}
+		this.settings.sourcePagePreset = this.normalizeSourcePagePreset(this.settings.sourcePagePreset);
+		this.settings.sourceAnnotationsMode = this.normalizeSourceManagedSectionMode(this.settings.sourceAnnotationsMode);
+		this.settings.sourceRelatedMode = this.normalizeSourceManagedSectionMode(this.settings.sourceRelatedMode);
+		this.settings.sourceReferencesMode = this.normalizeSourceManagedSectionMode(this.settings.sourceReferencesMode);
+		this.settings.sourceCitationsMode = this.normalizeSourceManagedSectionMode(this.settings.sourceCitationsMode);
+		this.settings.sourceFrontmatterMode = this.normalizeSourceFrontmatterMode(this.settings.sourceFrontmatterMode);
+		this.settings.annotationTemplatePreset = this.normalizeAnnotationTemplatePreset(this.settings.annotationTemplatePreset);
+		this.settings.annotationTextCopyDefault = this.normalizeAnnotationTextCopyFormat(this.settings.annotationTextCopyDefault);
+		this.settings.annotationImageCopyDefault = this.normalizeAnnotationImageCopyFormat(this.settings.annotationImageCopyDefault);
 	}
 
 	async saveSettings() {
@@ -5030,7 +6277,20 @@ export default class ZotsidianPlugin extends Plugin {
 			autoBootstrapSourcePages: this.settings.autoBootstrapSourcePages,
 			autoCreateSourceOnCitationSelect: this.settings.autoCreateSourceOnCitationSelect,
 			sourceNotesFolderPath: this.settings.sourceNotesFolderPath,
+			sourceFullNoteTemplatePath: this.settings.sourceFullNoteTemplatePath,
 			sourceTemplatePath: this.settings.sourceTemplatePath,
+			sourceBodyTemplatePath: this.settings.sourceBodyTemplatePath,
+			sourcePagePreset: this.normalizeSourcePagePreset(this.settings.sourcePagePreset),
+			sourceAnnotationsMode: this.normalizeSourceManagedSectionMode(this.settings.sourceAnnotationsMode),
+			sourceRelatedMode: this.normalizeSourceManagedSectionMode(this.settings.sourceRelatedMode),
+			sourceReferencesMode: this.normalizeSourceManagedSectionMode(this.settings.sourceReferencesMode),
+			sourceCitationsMode: this.normalizeSourceManagedSectionMode(this.settings.sourceCitationsMode),
+			sourceFrontmatterMode: this.normalizeSourceFrontmatterMode(this.settings.sourceFrontmatterMode),
+			annotationTemplatePreset: this.normalizeAnnotationTemplatePreset(this.settings.annotationTemplatePreset),
+			annotationTextTemplatePath: this.settings.annotationTextTemplatePath,
+			annotationImageTemplatePath: this.settings.annotationImageTemplatePath,
+			annotationTextCopyDefault: this.normalizeAnnotationTextCopyFormat(this.settings.annotationTextCopyDefault),
+			annotationImageCopyDefault: this.normalizeAnnotationImageCopyFormat(this.settings.annotationImageCopyDefault),
 			enableSidebarAttachments: this.settings.enableSidebarAttachments,
 			zoteroDataDir: this.settings.zoteroDataDir,
 			showSourceRelatedPapers: this.settings.showSourceRelatedPapers,
@@ -5039,9 +6299,11 @@ export default class ZotsidianPlugin extends Plugin {
 			showCitationHoverCard: this.settings.showCitationHoverCard,
 			citationHoverOpenAction: this.settings.citationHoverOpenAction,
 			enableDiscourseGraphsCompatibility: this.settings.enableDiscourseGraphsCompatibility,
+			showDiscourseNodeImagePreview: this.settings.showDiscourseNodeImagePreview,
 			discourseGraphVisibleNodeTypeIds: Array.isArray(this.settings.discourseGraphVisibleNodeTypeIds)
 				? [...this.settings.discourseGraphVisibleNodeTypeIds]
 				: [],
+			pinnedDiscourseNodes: this.normalizePinnedDiscourseNodes(this.settings.pinnedDiscourseNodes),
 			enableDiscourseDebugLogging: this.settings.enableDiscourseDebugLogging,
 			showJsonFallbackSettingInAdvanced: this.settings.showJsonFallbackSettingInAdvanced,
 		};

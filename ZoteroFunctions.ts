@@ -14,6 +14,7 @@ const ZOTERO_HOST_CANDIDATES = [
 ];
 
 const JSON_RPC_PATH = '/better-bibtex/json-rpc';
+const HTTP_REQUEST_TIMEOUT_MS = 8000;
 
 const baseOptions = {
     url: `http://localhost:23119${JSON_RPC_PATH}`,
@@ -108,6 +109,9 @@ async function nodeHttpRequest(url: string, method: 'GET' | 'POST', headers: Rec
         });
 
         req.on('error', reject);
+        req.setTimeout(HTTP_REQUEST_TIMEOUT_MS, () => {
+            req.destroy(Error(`Zotero request timed out after ${HTTP_REQUEST_TIMEOUT_MS}ms`));
+        });
 
         if (body && body.length > 0) {
             req.write(body);
@@ -710,6 +714,20 @@ function zoteroOpenPdfUri(libraryId: string, attachmentKey: string): string {
     return `zotero://open-pdf/groups/${libraryId}/items/${attachmentKey}`;
 }
 
+function zoteroOpenPdfAnnotationUri(libraryId: string, attachmentKey: string, annotation: AttachmentAnnotation): string {
+    const base = zoteroOpenPdfUri(libraryId, attachmentKey);
+    const params = new URLSearchParams();
+    const page = extractAnnotationPageNumber(annotation);
+    if (page != null) {
+        params.set('page', String(page));
+    }
+    if (annotation.key) {
+        params.set('annotation', annotation.key);
+    }
+    const query = params.toString();
+    return query ? `${base}?${query}` : base;
+}
+
 async function requestLocalApiJson(path: string): Promise<unknown[]> {
     const preferredOrigin = resolvedJsonRpcUrl ? originFromUrl(resolvedJsonRpcUrl) : null;
     const origins = preferredOrigin ? [preferredOrigin, ...ZOTERO_HOST_CANDIDATES] : [...ZOTERO_HOST_CANDIDATES];
@@ -753,6 +771,10 @@ type AttachmentAnnotation = {
     annotationAuthorName: string;
     annotationColor: string;
     annotationComment: string;
+    annotationTags: string[];
+    annotationPageLabel?: string;
+    annotationPosition?: unknown;
+    annotationSortIndex?: string;
     annotationText: string;
     annotationType: string;
     dateAdded: string;
@@ -761,6 +783,7 @@ type AttachmentAnnotation = {
     key: string;
     parentItem: string;
     annotationImagePath?: string;
+    openHref?: string;
 };
 
 type AttachmentResult = {
@@ -769,6 +792,27 @@ type AttachmentResult = {
     label?: string;
     annotations?: AttachmentAnnotation[];
 };
+
+function extractAnnotationPageNumber(annotation: AttachmentAnnotation): number | null {
+    const position = annotation.annotationPosition;
+    if (position && typeof position === 'object' && !Array.isArray(position)) {
+        const record = position as Record<string, unknown>;
+        const pageIndex = record.pageIndex;
+        if (typeof pageIndex === 'number' && Number.isFinite(pageIndex) && pageIndex >= 0) {
+            return Math.floor(pageIndex) + 1;
+        }
+        const pageLabel = record.pageLabel;
+        if (typeof pageLabel === 'string') {
+            const parsed = parseInt(pageLabel, 10);
+            if (Number.isFinite(parsed) && parsed > 0) return parsed;
+        }
+    }
+
+    const label = (annotation.annotationPageLabel || '').trim();
+    if (!label) return null;
+    const parsed = parseInt(label, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
 
 export type SourceLookupDiagnostics = {
     citekey: string;
@@ -795,6 +839,27 @@ export type AttachmentLookupHint = {
 
 const ENABLE_LOCAL_API_ANNOTATION_LOOKUP = true;
 
+function normalizeTagLabels(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    const labels: string[] = [];
+    const seen = new Set<string>();
+    for (const entry of value) {
+        let label = '';
+        if (typeof entry === 'string') {
+            label = entry.trim();
+        } else if (entry && typeof entry === 'object') {
+            const record = entry as Record<string, unknown>;
+            if (typeof record.tag === 'string') label = record.tag.trim();
+            else if (typeof record.name === 'string') label = record.name.trim();
+            else if (typeof record.label === 'string') label = record.label.trim();
+        }
+        if (!label || seen.has(label.toLowerCase())) continue;
+        seen.add(label.toLowerCase());
+        labels.push(label);
+    }
+    return labels;
+}
+
 function normalizeLocalApiAnnotation(entry: Record<string, unknown>): AttachmentAnnotation | null {
     const data = (entry.data ?? {}) as Record<string, unknown>;
     if (data.itemType !== 'annotation') return null;
@@ -805,6 +870,10 @@ function normalizeLocalApiAnnotation(entry: Record<string, unknown>): Attachment
         annotationAuthorName: typeof data.annotationAuthorName === 'string' ? data.annotationAuthorName : '',
         annotationColor: typeof data.annotationColor === 'string' ? data.annotationColor : '#ffd400',
         annotationComment: typeof data.annotationComment === 'string' ? data.annotationComment : '',
+        annotationTags: normalizeTagLabels(data.tags),
+        annotationPageLabel: typeof data.annotationPageLabel === 'string' ? data.annotationPageLabel : undefined,
+        annotationPosition: data.annotationPosition,
+        annotationSortIndex: typeof data.annotationSortIndex === 'string' ? data.annotationSortIndex : undefined,
         annotationText: typeof data.annotationText === 'string' ? data.annotationText : '',
         annotationType: typeof data.annotationType === 'string' ? data.annotationType : 'highlight',
         dateAdded: typeof data.dateAdded === 'string' ? data.dateAdded : '',
@@ -1516,17 +1585,21 @@ async function attachmentsViaLocalApi(citeKey: string, located: LocationResult |
     }
 
     const ordered = [...attachments].sort((a, b) => Number(isPdfAttachment(b)) - Number(isPdfAttachment(a)));
-    const attachmentRows = ordered.map((attachment) => {
+    const attachmentRows: AttachmentResult[] = ordered.map((attachment) => {
         const openUri = isPdfAttachment(attachment)
             ? zoteroOpenPdfUri(libraryIdHint ?? '1', attachment.key)
             : (attachment.linkMode !== 'linked_url'
                 ? zoteroOpenPdfUri(libraryIdHint ?? '1', attachment.key)
                 : zoteroSelectUri(libraryIdHint ?? '1', attachment.key));
+        const annotationRows = (annotationsByParent.get(attachment.key) || []).map((annotation) => ({
+            ...annotation,
+            openHref: zoteroOpenPdfAnnotationUri(libraryIdHint ?? '1', attachment.key, annotation),
+        }));
         return {
             open: openUri,
             path: true,
             label: attachment.filename || attachment.title || (isPdfAttachment(attachment) ? 'PDF attachment' : 'Attachment'),
-            annotations: annotationsByParent.get(attachment.key) || [],
+            annotations: annotationRows,
         };
     });
 
