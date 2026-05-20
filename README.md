@@ -8,6 +8,9 @@ It started from a simple citation workflow idea inspired by [zotero-roam](https:
 
 ![Zotsidian cover](./gifs/cover.png)
 
+## v0.1.2 Update
+<img width="1381" height="550" alt="image" src="https://github.com/user-attachments/assets/e18002bf-59e1-4778-a839-1a3e73242031" />
+
 ## Highlights
 
 Zotsidian is built around five practical capabilities:
