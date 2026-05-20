@@ -8,6 +8,9 @@ Zotsidian 是一个整合Zotero 8 工作流的的 Obsidian 插件。支持流畅
 
 ![Zotsidian cover](./gifs/cover.png)
 
+## v0.1.2 更新
+<img width="1381" height="550" alt="image" src="https://github.com/user-attachments/assets/0043c524-f714-4c70-8fc8-c2aadccb6154" />
+
 ## Highlights
 
 Zotsidian 当前围绕 5 个实用能力构建：
