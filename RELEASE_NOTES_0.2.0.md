@@ -5,10 +5,12 @@ Zotsidian 0.2.0 is a major workflow release. It consolidates the unpublished
 The plugin now supports a progressive path from everyday Zotero writing to
 structured research synthesis and Markdown-native project review.
 
-The refreshed 0.2.0 candidate also hardens exact annotation navigation and
+The refreshed 0.2.0 build also hardens exact annotation navigation and
 preserves concurrent note edits during annotation refresh, insertion, and
 managed-section migration. Release preparation checks runtime bytes and the
 public distribution file allowlist.
+Concurrent References open requests now create a single sidebar, and stale
+Source refreshes stop after the view closes or a newer refresh starts.
 
 ## Choose the workflow you need
 
