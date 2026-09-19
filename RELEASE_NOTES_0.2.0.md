@@ -5,6 +5,11 @@ Zotsidian 0.2.0 is a major workflow release. It consolidates the unpublished
 The plugin now supports a progressive path from everyday Zotero writing to
 structured research synthesis and Markdown-native project review.
 
+The refreshed 0.2.0 candidate also hardens exact annotation navigation and
+preserves concurrent note edits during annotation refresh, insertion, and
+managed-section migration. Release preparation checks runtime bytes and the
+public distribution file allowlist.
+
 ## Choose the workflow you need
 
 - **Light** keeps the complete Zotero-to-Obsidian workflow: Search, citation

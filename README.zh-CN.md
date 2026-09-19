@@ -109,8 +109,6 @@ Search 面板还提供 My Library/Group 选择、Zotero indexed text 与 saved s
 `Zotsidian: Export active manuscript BibTeX` 会稳定排序并报告未解析 citekey，
 传递引用范围必须显式开启。
 
-![Zotsidian cover](./gifs/cover.png)
-
 <details>
 <summary>此前的 v0.1.2 界面</summary>
 

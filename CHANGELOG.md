@@ -2,6 +2,16 @@
 
 ## 0.2.0
 
+### Release stabilization
+
+- Annotation navigation includes the owning PDF and annotation key, preserves
+  existing absolute page links, and prefers authoritative PDF position data.
+- Source annotation refresh, single-annotation insertion, managed-section
+  migration, and Result node-link updates use atomic note transformations to
+  preserve edits made while asynchronous work is pending.
+- Release preparation validates exact runtime artifact bytes and a strict
+  public distribution file allowlist before publication.
+
 This release consolidates the unpublished 0.1.4 and 0.1.5 candidates into the
 first public release of Zotsidian's complete Zotero-to-research-project
 workflow. It is a substantial product expansion from 0.1.2, so the version

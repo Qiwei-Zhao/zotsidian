@@ -119,8 +119,6 @@ Inspector rather than a separate annotation-search modal. `Zotsidian: Export
 active manuscript BibTeX` produces stable sorted output and reports unresolved
 citekeys; transitive inclusion is explicit.
 
-![Zotsidian cover](./gifs/cover.png)
-
 <details>
 <summary>Previous v0.1.2 interface</summary>
 
