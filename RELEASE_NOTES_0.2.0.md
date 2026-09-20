@@ -11,6 +11,8 @@ managed-section migration. Release preparation checks runtime bytes and the
 public distribution file allowlist.
 Concurrent References open requests now create a single sidebar, and stale
 Source refreshes stop after the view closes or a newer refresh starts.
+Reloading the plugin also preserves the existing References sidebar without
+creating a duplicate tab.
 
 ## Choose the workflow you need
 

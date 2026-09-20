@@ -6,6 +6,8 @@
 
 - Concurrent References open requests share one sidebar creation; stale
   Source renders stop after close, reopen, or a newer refresh.
+- Plugin reload waits for Obsidian to restore existing sidebar leaves before
+  creating a missing References view.
 - Annotation navigation includes the owning PDF and annotation key, preserves
   existing absolute page links, and prefers authoritative PDF position data.
 - Source annotation refresh, single-annotation insertion, managed-section
