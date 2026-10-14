@@ -6,6 +6,13 @@ Zotsidian 是一个整合 Zotero 原生工作流的 Obsidian 桌面插件，支�
 
 它起初来自一个引用文献插入的工作流想法，受到了 [zotero-roam](https://github.com/alixlahuec/zotero-roam) 和 [obsidian-deepsit](https://github.com/bassio/obsidian-deepsit) 的启发；现在已经发展成一个更完整的 Zotero-to-Obsidian 工作流，并支持 [discourse-graphs](https://github.com/DiscourseGraphs/discourse-graph)，整个项目由 AI 辅助开发。核心发布路径已经完成回归测试；Beta 项目功能仍属实验性，欢迎反馈问题和建议。
 
+## Zotsidian 0.2.1
+
+补丁更新：自定义目录中的 Discourse Canvas 关闭后，仍会显示在 Explorer
+和 Canvas 选择列表中。
+
+[0.2.1 发布说明](RELEASE_NOTES_0.2.1.md)
+
 ## Zotsidian 0.2.0
 
 0.2.0 是完整 Light → Plus → Beta 工作流的首次公开发布。它在 Zotero/source
@@ -15,7 +22,7 @@ handoff。重新发布的安装包已包含 Question/Hypothesis Trace 标题修�
 
 - [完整图文与视频教程](docs/ZOTSIDIAN_TUTORIAL.zh-CN.md)
 - [更新记录](CHANGELOG.md)
-- [发布说明](RELEASE_NOTES_0.2.0.md)
+- [发布说明](RELEASE_NOTES_0.2.1.md)
 
 ## 0.2.0 界面速览
 

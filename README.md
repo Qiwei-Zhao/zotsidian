@@ -6,6 +6,13 @@ Zotsidian is an Obsidian desktop extension for Zotero-native writing, source pag
 
 It started from a simple citation workflow idea inspired by [zotero-roam](https://github.com/alixlahuec/zotero-roam) and [obsidian-deepsit](https://github.com/bassio/obsidian-deepsit), and has grown into a more integrated Zotero-to-Obsidian workflow layer with support for [discourse-graphs](https://github.com/DiscourseGraphs/discourse-graph), built with AI-assisted development. The core release path is regression-tested; Beta project features remain experimental, so issue reports and suggestions are welcome.
 
+## Zotsidian 0.2.1
+
+Patch release: closed Discourse Canvases remain discoverable in Explorer
+and Canvas pickers when stored in custom folders.
+
+[0.2.1 release notes](RELEASE_NOTES_0.2.1.md)
+
 ## Zotsidian 0.2.0
 
 Version 0.2.0 is the first public release of the complete Light → Plus → Beta
@@ -16,7 +23,7 @@ build includes the corrected structured Question/Hypothesis Trace titles.
 
 - [Illustrated Chinese tutorial](docs/ZOTSIDIAN_TUTORIAL.zh-CN.md)
 - [Changelog](CHANGELOG.md)
-- [Release notes](RELEASE_NOTES_0.2.0.md)
+- [Release notes](RELEASE_NOTES_0.2.1.md)
 
 ## 0.2.0 interface tour
 

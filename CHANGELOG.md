@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Discover closed Discourse Canvases by their `tldr-dg` / `tldraw-dg`
+  frontmatter marker, including files in custom Canvas folders.
+
 ## 0.2.0
 
 ### Release stabilization
